@@ -570,7 +570,7 @@ def render_split(draw, s, design, fonts, width, height, scale):
         draw, story_en, x, y,
         fonts["story_small"], inner_w,
         (245, 245, 245, 255),
-        int(13 * scale),
+        int(15 * scale),
         max_lines=4,
     )
 
@@ -585,7 +585,7 @@ def render_split(draw, s, design, fonts, width, height, scale):
             draw, story_hi, x, y,
             fonts["hindi_small"], inner_w,
             (245, 245, 245, 255),
-            int(13 * scale),
+            int(15 * scale),
             max_lines=5,
         )
 
@@ -648,7 +648,7 @@ def render_hero_title(draw, s, design, fonts, width, height, scale):
         draw, story_en, x, y,
         fonts["story_small"], maxw,
         (245, 245, 245, 255),
-        int(13 * scale),
+        int(15 * scale),
         max_lines=4,
     )
 
@@ -664,7 +664,7 @@ def render_hero_title(draw, s, design, fonts, width, height, scale):
             draw, story_hi, x, y,
             fonts["hindi_small"], maxw,
             (245, 245, 245, 255),
-            int(13 * scale),
+            int(15 * scale),
             max_lines=5,
         )
 
@@ -752,7 +752,7 @@ def render_announcement(draw, s, design, fonts, width, height, scale):
         draw, story_en, x, y,
         fonts["story_small"], inner_w,
         (245, 245, 245, 255),
-        int(13 * scale),
+        int(15 * scale),
         max_lines=4,
     )
 
@@ -768,7 +768,7 @@ def render_announcement(draw, s, design, fonts, width, height, scale):
             draw, story_hi, x, y,
             fonts["hindi_small"], inner_w,
             (245, 245, 245, 255),
-            int(13 * scale),
+            int(15 * scale),
             max_lines=5,
         )
 
@@ -845,7 +845,7 @@ def render_release_or_stat(draw, s, design, fonts, width, height, scale):
         draw, story_en, x, y,
         fonts["story_small"], inner_w,
         (245, 245, 245, 255),
-        int(13 * scale),
+        int(15 * scale),
         max_lines=4,
     )
 
@@ -861,7 +861,7 @@ def render_release_or_stat(draw, s, design, fonts, width, height, scale):
             draw, story_hi, x, y,
             fonts["hindi_small"], inner_w,
             (245, 245, 245, 255),
-            int(13 * scale),
+            int(15 * scale),
             max_lines=5,
         )
 
@@ -898,10 +898,10 @@ def render(data, output, width, height):
         "hero_headline": make_font(int(57 * scale), bold=True),
         "hero_stat": make_font(int(68 * scale), bold=True),
         "story": make_font(int(28 * scale)),
-        "story_small": make_font(int(31 * scale)),
+        "story_small": make_font(int(36 * scale)),
         "hindi_label": make_font(int(22 * scale), hindi=True, bold=True),
         "hindi": make_font(int(27 * scale), hindi=True),
-        "hindi_small": make_font(int(30 * scale), hindi=True),
+        "hindi_small": make_font(int(35 * scale), hindi=True),
         "label": make_font(int(21 * scale), bold=True),
     }
 
