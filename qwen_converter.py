@@ -299,7 +299,7 @@ def convert_story(
 
             "format": {
 
-                "aspect_ratio": "4:5",
+                "aspect_ratio": "9:16",
 
                 "width": 1080,
 
@@ -336,7 +336,7 @@ def convert_story(
 
                 "Do not add unrelated people or imagery.",
 
-                "Create a polished 4:5 Instagram slide."
+                "Create a polished 9:16 Instagram slide."
             ]
         }
     }
@@ -466,7 +466,7 @@ def process_category(
                 total_slides,
 
             "format":
-                "4:5",
+                "9:16",
 
             "width":
                 1080,
