@@ -208,19 +208,65 @@ def strip_thinking(text: str) -> str:
     return text.strip()
 
 
+def extract_balanced_json(text: str) -> str:
+    """
+    Extract the first balanced JSON object from Qwen output.
+
+    Qwen occasionally emits a syntactically broken preamble or additional
+    text around the JSON. A simple first-{ / last-} slice is not sufficient
+    when the response contains braces inside strings.
+    """
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("No JSON object found in Qwen response.")
+
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for i in range(start, len(text)):
+        ch = text[i]
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+
+    raise ValueError("Qwen response contains an incomplete JSON object.")
+
+
 def parse_json(text: str):
     cleaned = strip_thinking(text)
 
+    # First try the complete response.
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        # Recover the first complete JSON object.
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(cleaned[start:end + 1])
+        pass
 
-    raise ValueError("Qwen did not return valid JSON.")
+    # Then extract a balanced JSON object.
+    candidate = extract_balanced_json(cleaned)
+
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Qwen returned malformed JSON: {e}. "
+            f"Response excerpt: {candidate[max(0, e.pos-120):e.pos+120]}"
+        ) from e
 
 
 def ollama_generate(base_url, model, prompt, temperature, timeout):
@@ -237,7 +283,7 @@ def ollama_generate(base_url, model, prompt, temperature, timeout):
         "think": False,
         "options": {
             "temperature": temperature,
-            "num_predict": 1400,
+            "num_predict": 1000,
         },
     }
 
@@ -397,6 +443,8 @@ Remember:
 - Keep the response compact: maximum 8 visual elements.
 - Do not explain your reasoning.
 - design_notes must be one short sentence.
+- Do not put comments or trailing commas in JSON.
+- Do not output any text before or after the JSON object.
 """
 
 
@@ -418,7 +466,61 @@ def design_one(slide, cfg):
         timeout,
     )
 
-    design = parse_json(raw)
+    try:
+        design = parse_json(raw)
+    except ValueError as first_error:
+        print("    WARN: Qwen returned malformed JSON; retrying compact JSON-only request...")
+
+        repair_prompt = f"""
+Return ONLY one valid JSON object. No markdown, no explanation, no thinking.
+
+The previous response for this slide could not be parsed:
+{str(first_error)}
+
+Recreate the same slide design using the schema and editorial content below.
+Keep it compact: maximum 7 elements. Every element must have integer
+x, y, width, height values within 1080x1920.
+
+SCHEMA:
+{json.dumps({
+    "layout": "hero_stat|hero_title|split_story|portrait_focus|announcement|release_date|award|streaming_record|box_office|quote_focus|comparison|standard_news",
+    "story_type": "string",
+    "visual_priority": "string",
+    "hero_text": "string",
+    "hero_label": "string",
+    "secondary_text": "string",
+    "secondary_label": "string",
+    "supporting_text": "string",
+    "emphasis_words": [],
+    "image_treatment": "string",
+    "image_position": "string",
+    "text_position": "string",
+    "headline_style": {"size": "large|medium|small", "weight": "bold|regular", "alignment": "left|center|right"},
+    "story_style": {"size": "medium|small", "alignment": "left|center|right", "english_then_hindi": True},
+    "show_story": True,
+    "show_date": True,
+    "show_source_brand": True,
+    "canvas": {"width": 1080, "height": 1920, "aspect_ratio": "9:16"},
+    "elements": [],
+    "design_notes": "one short sentence"
+}, ensure_ascii=False, indent=2)}
+
+EDITORIAL:
+{json.dumps({
+    "slide": slide.get("slide", {}),
+    "source": slide.get("source", {})
+}, ensure_ascii=False, indent=2)}
+"""
+
+        raw_retry = ollama_generate(
+            ollama_url,
+            model,
+            repair_prompt,
+            0.0,
+            timeout,
+        )
+        design = parse_json(raw_retry)
+
     validate_design(design)
 
     design["generated_by"] = "qwen"
