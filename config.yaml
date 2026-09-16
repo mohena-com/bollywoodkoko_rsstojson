@@ -43,6 +43,10 @@ output:
   folder: "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/bollywood/OP_JSON"
   filename: "bollywood_hungama_today.json"
 
+reel:
+  music_folder: "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/data/music"
+  duration_per_slide: 5.0
+
 qwen:
   ollama_url: "http://localhost:11434"
   model: "qwen3:8b"
