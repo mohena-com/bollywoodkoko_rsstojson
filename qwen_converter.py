@@ -7,6 +7,7 @@ from pathlib import Path
 from html import unescape
 
 import yaml
+import requests
 
 
 # ============================================================
@@ -207,6 +208,223 @@ def load_source_json(json_path):
         return json.load(f)
 
 
+
+# ============================================================
+# Ollama / Qwen
+# ============================================================
+
+def get_qwen_config(config):
+    qwen_config = config.get("qwen", {})
+
+    return {
+        "url": qwen_config.get(
+            "ollama_url",
+            "http://localhost:11434"
+        ),
+        "model": qwen_config.get(
+            "model",
+            "qwen3:8b"
+        ),
+        "temperature": qwen_config.get(
+            "temperature",
+            0.2
+        ),
+        "timeout": qwen_config.get(
+            "timeout",
+            120
+        )
+    }
+
+
+def check_ollama(qwen_config):
+    url = (
+        qwen_config["url"].rstrip("/")
+        + "/api/tags"
+    )
+
+    print("\nChecking Ollama...")
+
+    try:
+        response = requests.get(
+            url,
+            timeout=10
+        )
+        response.raise_for_status()
+
+        models = response.json().get(
+            "models",
+            []
+        )
+
+        model_names = [
+            model.get("name")
+            for model in models
+        ]
+
+        requested_model = qwen_config["model"]
+
+        if requested_model not in model_names:
+            print(
+                f"WARNING: Model '{requested_model}' "
+                "was not found."
+            )
+            print("Available models:")
+
+            for name in model_names:
+                print(f"  - {name}")
+
+            return False
+
+        print("Ollama OK")
+        print(f"Model: {requested_model}")
+
+        return True
+
+    except Exception as e:
+        print(f"WARNING: Cannot connect to Ollama: {e}")
+        return False
+
+
+def qwen_summarize(title, description, qwen_config):
+    """
+    Use local Ollama/Qwen to generate an Instagram headline
+    and a meaningful 2-3 sentence summary.
+    """
+
+    title = clean_text(title)
+    description = clean_text(description)
+
+    prompt = f"""
+You are an experienced Bollywood entertainment news editor.
+
+Create Instagram-ready content from the source article below.
+
+SOURCE TITLE:
+{title}
+
+SOURCE DESCRIPTION:
+{description}
+
+Return ONLY valid JSON in exactly this format:
+
+{{
+  "headline": "short Instagram headline",
+  "summary": "meaningful 2-3 sentence summary"
+}}
+
+Rules:
+1. Preserve the facts in the source.
+2. Do not invent information.
+3. Do not speculate.
+4. Identify the main news or event.
+5. Mention important people, films, dates or numbers when present.
+6. Remove unnecessary repetition.
+7. Remove promotional language.
+8. Use simple, natural English.
+9. The headline should be concise and attention-grabbing.
+10. The summary should explain the actual story rather than mechanically shortening it.
+11. Headline maximum approximately 110 characters.
+12. Summary maximum approximately 450 characters.
+13. Do not use emojis.
+14. Do not add hashtags.
+15. Return ONLY JSON. Do not include explanations.
+"""
+
+    endpoint = (
+        qwen_config["url"].rstrip("/")
+        + "/api/generate"
+    )
+
+    payload = {
+        "model": qwen_config["model"],
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": qwen_config["temperature"]
+        }
+    }
+
+    response = requests.post(
+        endpoint,
+        json=payload,
+        timeout=qwen_config["timeout"]
+    )
+    response.raise_for_status()
+
+    result = response.json()
+
+    raw_response = result.get(
+        "response",
+        ""
+    )
+
+    if not raw_response:
+        raise ValueError(
+            "Ollama returned an empty response."
+        )
+
+    # Qwen3 may return internal reasoning in <think>...</think>.
+    # Remove it before parsing the JSON answer.
+    raw_response = re.sub(
+        r"<think>.*?</think>",
+        "",
+        raw_response,
+        flags=re.IGNORECASE | re.DOTALL
+    ).strip()
+
+    # Remove accidental Markdown JSON fences.
+    raw_response = re.sub(
+        r"^```(?:json)?\s*",
+        "",
+        raw_response,
+        flags=re.IGNORECASE
+    )
+
+    raw_response = re.sub(
+        r"\s*```$",
+        "",
+        raw_response
+    ).strip()
+
+    try:
+        parsed = json.loads(raw_response)
+
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            "Qwen returned invalid JSON after removing "
+            f"<think> content: {raw_response[:1000]}"
+        ) from e
+
+    headline = clean_text(
+        parsed.get("headline", "")
+    )
+
+    summary = clean_text(
+        parsed.get("summary", "")
+    )
+
+    if not headline:
+        headline = clean_headline(title)
+
+    if not summary:
+        summary = shorten_text(
+            description,
+            STORY_MAX_CHARS
+        )
+
+    return {
+        "headline": shorten_text(
+            headline,
+            HEADLINE_MAX_CHARS
+        ),
+        "summary": shorten_text(
+            summary,
+            STORY_MAX_CHARS
+        )
+    }
+
+
 # ============================================================
 # Story conversion
 # ============================================================
@@ -215,7 +433,9 @@ def convert_story(
     story,
     category_name,
     slide_number,
-    total_slides
+    total_slides,
+    qwen_config,
+    ollama_available
 ):
     """Convert one story into Qwen JSON."""
 
@@ -351,7 +571,9 @@ def convert_story(
 def process_category(
     category_name,
     category_data,
-    qwen_root
+    qwen_root,
+    qwen_config,
+    ollama_available
 ):
     """
     Process ONE category.
@@ -418,7 +640,9 @@ def process_category(
             story=story,
             category_name=category_name,
             slide_number=slide_number,
-            total_slides=total_slides
+            total_slides=total_slides,
+            qwen_config=qwen_config,
+            ollama_available=ollama_available
         )
 
         combined_slides.append(
@@ -535,6 +759,21 @@ def convert(config_file):
     )
 
     # --------------------------------------------------------
+    # Qwen configuration
+    # --------------------------------------------------------
+
+    qwen_config = get_qwen_config(config)
+
+    print()
+    print("Qwen configuration:")
+    print(f"  Ollama : {qwen_config['url']}")
+    print(f"  Model  : {qwen_config['model']}")
+
+    ollama_available = check_ollama(
+        qwen_config
+    )
+
+    # --------------------------------------------------------
     # Get categories
     # --------------------------------------------------------
 
@@ -597,7 +836,9 @@ def convert(config_file):
         count = process_category(
             category_name=category_name,
             category_data=category_data,
-            qwen_root=qwen_root
+            qwen_root=qwen_root,
+            qwen_config=qwen_config,
+            ollama_available=ollama_available
         )
 
         summary[
@@ -618,6 +859,12 @@ def convert(config_file):
 
         "output_path":
             str(qwen_root),
+
+        "qwen": {
+            "enabled": ollama_available,
+            "model": qwen_config["model"],
+            "ollama_url": qwen_config["url"]
+        },
 
         "categories":
             summary,
