@@ -37,15 +37,48 @@ import sys
 from pathlib import Path
 
 import requests
+import yaml
 
 
-DEFAULT_INPUT = "../OP_JSON/qwen_input"
-DEFAULT_OUTPUT = None
+DEFAULT_CONFIG = "config.yaml"
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3:8b"
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_TIMEOUT = 120
+
+
+def load_config(config_path):
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def get_paths_from_config(config):
+    """Derive qwen_input and output paths from config.yaml."""
+    output_cfg = config.get("output", {}) or {}
+    output_folder = output_cfg.get("folder")
+
+    if not output_folder:
+        raise ValueError("config.yaml must contain output.folder")
+
+    output_root = Path(output_folder)
+    input_root = output_root / "qwen_input"
+
+    return input_root, output_root
+
+
+def get_qwen_config(config):
+    qwen = config.get("qwen", {}) or {}
+    return {
+        "ollama_url": qwen.get("ollama_url", DEFAULT_OLLAMA_URL),
+        "model": qwen.get("model", DEFAULT_MODEL),
+        "temperature": float(qwen.get("temperature", DEFAULT_TEMPERATURE)),
+        "timeout": int(qwen.get("timeout", DEFAULT_TIMEOUT)),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -490,40 +523,9 @@ def main():
     )
 
     parser.add_argument(
-        "--input",
-        default=DEFAULT_INPUT,
-        help="Root directory containing category/slide_*.json",
-    )
-
-    parser.add_argument(
-        "--output",
-        default=DEFAULT_OUTPUT,
-        help=(
-            "Output root. Default is the same as --input, so existing "
-            "slide JSON files are updated in place."
-        ),
-    )
-
-    parser.add_argument(
-        "--ollama-url",
-        default=DEFAULT_OLLAMA_URL,
-    )
-
-    parser.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-    )
-
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=DEFAULT_TEMPERATURE,
-    )
-
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=DEFAULT_TIMEOUT,
+        "--config",
+        default=DEFAULT_CONFIG,
+        help="Path to config.yaml. Input/output and Qwen settings are read from it.",
     )
 
     parser.add_argument(
@@ -540,23 +542,30 @@ def main():
 
     args = parser.parse_args()
 
-    input_root = Path(args.input)
-    output_root = Path(args.output) if args.output else input_root
+    try:
+        config = load_config(args.config)
+        input_root, output_root = get_paths_from_config(config)
+        qwen_cfg = get_qwen_config(config)
+    except Exception as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
 
     if not input_root.exists():
-        print(f"[ERROR] Input directory not found: {input_root}")
+        print(f"[ERROR] Qwen input directory not found: {input_root}")
+        print("Expected: output.folder/qwen_input from config.yaml")
         sys.exit(1)
 
     print("=" * 70)
     print("BollywoodKoko Qwen Slide Designer")
     print("=" * 70)
+    print(f"Config  : {args.config}")
     print(f"Input   : {input_root}")
     print(f"Output  : {output_root}")
-    print(f"Ollama  : {args.ollama_url}")
-    print(f"Model   : {args.model}")
+    print(f"Ollama  : {qwen_cfg['ollama_url']}")
+    print(f"Model   : {qwen_cfg['model']}")
     print()
 
-    if not check_ollama(args.ollama_url):
+    if not check_ollama(qwen_cfg["ollama_url"]):
         sys.exit(1)
 
     if args.category:
@@ -605,10 +614,10 @@ def main():
                 process_file(
                     json_path=json_path,
                     output_path=output_path,
-                    ollama_url=args.ollama_url,
-                    model=args.model,
-                    temperature=args.temperature,
-                    timeout=args.timeout,
+                    ollama_url=qwen_cfg["ollama_url"],
+                    model=qwen_cfg["model"],
+                    temperature=qwen_cfg["temperature"],
+                    timeout=qwen_cfg["timeout"],
                 )
 
                 processed += 1
