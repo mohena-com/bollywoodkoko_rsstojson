@@ -43,11 +43,25 @@ def get_slides_dir(config):
 
 
 def get_music_dir(config):
+    # Music location is controlled by config.yaml.
     reel_cfg = config.get("reel", {}) if isinstance(config, dict) else {}
     music_folder = reel_cfg.get("music_folder")
-    if music_folder:
-        return Path(music_folder)
-    return DEFAULT_MUSIC_DIR
+    if not music_folder:
+        raise ValueError("config.yaml: reel.music_folder is required.")
+    return Path(music_folder)
+
+
+def get_category_slides_dir(config, category: str):
+    base = get_slides_dir(config)
+    return base / category
+
+
+def get_category_reel_output(config, category: str):
+    output_cfg = config.get("output", {}) if isinstance(config, dict) else {}
+    output_folder = output_cfg.get("folder")
+    if not output_folder:
+        raise ValueError("config.yaml: output.folder is required.")
+    return Path(output_folder) / "reels" / category / f"{category}_reel.mp4"
 
 
 def get_audio_files(music_dir: Path):
@@ -60,9 +74,10 @@ def get_audio_files(music_dir: Path):
 
 
 def get_slide_files(slides_dir: Path):
+    """Return slides only from the requested category directory."""
     valid_exts = {".png", ".jpg", ".jpeg", ".webp"}
     files = [
-        p for p in slides_dir.rglob("*")
+        p for p in slides_dir.glob("slide_*")
         if p.is_file() and p.suffix.lower() in valid_exts
     ]
     return sorted(files)
@@ -88,7 +103,7 @@ def create_concat_list(slide_files, duration_per_slide: float, list_path: Path):
             f.write(f"file '{slide_files[-1].as_posix()}'\n")
 
 
-def build_reel(slides_dir: Path, music_dir: Path, output_path: Path, duration_per_slide: float = 3.0):
+def build_reel(slides_dir: Path, music_dir: Path, output_path: Path, duration_per_slide: float = 5.0):
     if not slides_dir.exists():
         raise FileNotFoundError(f"Slides directory does not exist: {slides_dir}")
 
@@ -132,8 +147,10 @@ def build_reel(slides_dir: Path, music_dir: Path, output_path: Path, duration_pe
         str(temp_output),
     ]
 
+    print(f"Music folder : {music_dir}")
     print(f"Selected music: {music_file}")
-    print(f"Slides: {len(slide_files)}")
+    print(f"Slides       : {len(slide_files)}")
+    print(f"Duration/slide: {duration_per_slide}s")
     print(f"Creating reel: {output_path}")
 
     subprocess.run(cmd, check=True)
@@ -154,6 +171,8 @@ def parse_args():
     ap.add_argument("--music-dir", type=Path, default=None, help="Directory containing music files")
     ap.add_argument("--output", type=Path, default=None, help="Output MP4 path")
     ap.add_argument("--duration-per-slide", type=float, default=None, help="Seconds to display each slide")
+    ap.add_argument("--category", type=str, default=None,
+                    help="Category to render, e.g. news, features, movie_reviews")
     return ap.parse_args()
 
 
@@ -162,18 +181,35 @@ def main():
 
     config = load_config(args.config)
 
-    slides_dir = args.slides_dir or get_slides_dir(config)
+    # Normal mode is category-driven:
+    #   painted_slides/<category>/slide_*.png
+    #       -> reels/<category>/<category>_reel.mp4
+    #
+    # Explicit --slides-dir / --output still work as overrides.
+    category = args.category.strip() if args.category else None
+
+    if category:
+        slides_dir = args.slides_dir or get_category_slides_dir(config, category)
+        output_path = args.output or get_category_reel_output(config, category)
+    else:
+        slides_dir = args.slides_dir or get_slides_dir(config)
+        output_path = args.output or (
+            Path(str(config.get("output", {}).get("folder", ".")))
+            / DEFAULT_OUTPUT
+        )
+
     music_dir = args.music_dir or get_music_dir(config)
-    duration = args.duration_per_slide if args.duration_per_slide is not None else float(
-        (config.get("reel", {}) if isinstance(config, dict) else {}).get("duration_per_slide", DEFAULT_DURATION_PER_SLIDE)
+
+    duration = (
+        args.duration_per_slide
+        if args.duration_per_slide is not None
+        else float(
+            (config.get("reel", {}) if isinstance(config, dict) else {})
+            .get("duration_per_slide", DEFAULT_DURATION_PER_SLIDE)
+        )
     )
-    output_path = args.output or Path(str(config.get("output", {}).get("folder", "."))) / DEFAULT_OUTPUT
 
-    if not args.output:
-        output_path = Path(output_path)
-
-    if not args.output and not str(output_path).endswith(".mp4"):
-        output_path = output_path / DEFAULT_OUTPUT
+    output_path = Path(output_path)
 
     try:
         build_reel(slides_dir, music_dir, output_path, duration_per_slide=duration)
