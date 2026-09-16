@@ -629,18 +629,6 @@ def render_hero_title(draw, s, design, fonts, width, height, scale):
     card_top = y
     card_bottom = int(height * 0.91)
 
-    rounded_panel(
-        draw,
-        (
-            margin - int(12 * scale),
-            card_top,
-            width - margin + int(12 * scale),
-            card_bottom,
-        ),
-        int(24 * scale),
-        (0, 0, 0, 185),
-    )
-
     x = margin
     y = card_top + int(20 * scale)
 
@@ -732,18 +720,6 @@ def render_announcement(draw, s, design, fonts, width, height, scale):
 
     card_top = y + int(12 * scale)
 
-    rounded_panel(
-        draw,
-        (
-            margin,
-            card_top,
-            width - margin,
-            int(height * 0.91),
-        ),
-        int(22 * scale),
-        (0, 0, 0, 185),
-    )
-
     x = margin + int(20 * scale)
     inner_w = maxw - int(40 * scale)
     y = card_top + int(18 * scale)
@@ -824,18 +800,6 @@ def render_release_or_stat(draw, s, design, fonts, width, height, scale):
         )
 
     y += int(18 * scale)
-
-    rounded_panel(
-        draw,
-        (
-            margin,
-            y,
-            width - margin,
-            int(height * 0.91),
-        ),
-        int(22 * scale),
-        (0, 0, 0, 190),
-    )
 
     x = margin + int(20 * scale)
     inner_w = maxw - int(40 * scale)
