@@ -501,31 +501,31 @@ def render_standard(draw, s, design, fonts, width, height, scale):
     y, _, _ = draw_wrapped(
         draw, headline, x, y,
         fonts["headline"], maxw, "white",
-        int(15 * scale),
+        int(18 * scale),
         max_lines=4,
     )
 
-    y += int(22 * scale)
+    y += int(24 * scale)
 
     y, _, _ = draw_wrapped(
         draw, story_en, x, y,
         fonts["story"], maxw, (245, 245, 245, 255),
-        int(13 * scale),
+        int(16 * scale),
         max_lines=6,
     )
 
     if story_hi:
-        y += int(20 * scale)
+        y += int(22 * scale)
 
         y = draw_section_label(
             draw, "हिंदी", x, y, fonts["hindi_label"], scale
         )
-        y += int(10 * scale)
+        y += int(12 * scale)
 
         draw_wrapped(
             draw, story_hi, x, y,
             fonts["hindi"], maxw, (245, 245, 245, 255),
-            int(13 * scale),
+            int(16 * scale),
             max_lines=7,
         )
 
@@ -620,12 +620,12 @@ def render_hero_title(draw, s, design, fonts, width, height, scale):
         fonts["hero_headline"],
         maxw,
         "white",
-        int(10 * scale),
+        int(14 * scale),
         max_lines=4,
     )
 
     # Compact bilingual editorial card.
-    y += int(22 * scale)
+    y += int(24 * scale)
     card_top = y
     card_bottom = int(height * 0.91)
 
@@ -648,23 +648,23 @@ def render_hero_title(draw, s, design, fonts, width, height, scale):
         draw, story_en, x, y,
         fonts["story_small"], maxw,
         (245, 245, 245, 255),
-        int(15 * scale),
+        int(18 * scale),
         max_lines=4,
     )
 
     if story_hi:
-        y += int(13 * scale)
+        y += int(15 * scale)
         y = draw_section_label(
             draw, "हिंदी", x, y,
             fonts["hindi_label"], scale
         )
-        y += int(7 * scale)
+        y += int(9 * scale)
 
         draw_wrapped(
             draw, story_hi, x, y,
             fonts["hindi_small"], maxw,
             (245, 245, 245, 255),
-            int(15 * scale),
+            int(18 * scale),
             max_lines=5,
         )
 
@@ -886,23 +886,23 @@ def render(data, output, width, height):
     scale = width / 1080.0
     margin = int(58 * scale)
 
-    # Use a slightly smaller font for bilingual content to guarantee
-    # comfortable fit on a 1080x1920 canvas.
+    # Reduce oversized English text for mobile readability while keeping
+    # the bilingual design intact.
     fonts = {
         "cat": make_font(int(27 * scale), bold=True),
         "slide": make_font(int(23 * scale)),
         "footer": make_font(int(21 * scale)),
-        "headline": make_font(int(55 * scale), bold=True),
-        "headline_medium": make_font(int(37 * scale), bold=True),
-        "headline_large": make_font(int(54 * scale), bold=True),
-        "hero_headline": make_font(int(57 * scale), bold=True),
-        "hero_stat": make_font(int(68 * scale), bold=True),
-        "story": make_font(int(28 * scale)),
-        "story_small": make_font(int(36 * scale)),
+        "headline": make_font(int(42 * scale), bold=True),
+        "headline_medium": make_font(int(30 * scale), bold=True),
+        "headline_large": make_font(int(40 * scale), bold=True),
+        "hero_headline": make_font(int(40 * scale), bold=True),
+        "hero_stat": make_font(int(46 * scale), bold=True),
+        "story": make_font(int(24 * scale)),
+        "story_small": make_font(int(22 * scale)),
         "hindi_label": make_font(int(22 * scale), hindi=True, bold=True),
         "hindi": make_font(int(50 * scale), hindi=True),
         "hindi_small": make_font(int(35 * scale), hindi=True),
-        "label": make_font(int(21 * scale), bold=True),
+        "label": make_font(int(18 * scale), bold=True),
     }
 
     image_position = design["image_position"]
