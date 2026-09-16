@@ -1,966 +1,727 @@
 #!/usr/bin/env python3
+"""
+qwen_converter.py
 
+Convert the Bollywood Hungama RSS JSON into category-wise Qwen input JSON
+for Instagram carousel generation.
+
+Key features:
+- Calls local Ollama/Qwen for EVERY story.
+- Generates a meaningful editorial summary instead of truncating the source.
+- Generates English + Hindi story summaries in one Qwen call.
+- Removes Qwen <think>...</think> output before JSON parsing.
+- Uses Ollama JSON output mode.
+- Keeps the original source title/description in the output.
+- Falls back safely to source text if Qwen is unavailable.
+- Resets slide numbering for every category/carousel.
+- Targets Instagram 9:16, 1080x1920.
+"""
+
+import argparse
+import html
 import json
 import re
-import argparse
+import sys
 from pathlib import Path
-from html import unescape
 
-import yaml
 import requests
+import yaml
 
-
-# ============================================================
-# Configuration
-# ============================================================
 
 DEFAULT_CONFIG = "config.yaml"
-
 QWEN_SUBFOLDER = "qwen_input"
 
 HEADLINE_MAX_CHARS = 110
-STORY_MAX_CHARS = 450
+
+# This is ONLY a safety limit. Normal Qwen summaries are NOT truncated.
+SUMMARY_SAFETY_MAX_CHARS = 1200
 
 
-# ============================================================
-# Text utilities
-# ============================================================
+DEFAULT_QWEN_CONFIG = {
+    "ollama_url": "http://localhost:11434",
+    "model": "qwen3:8b",
+    "temperature": 0.2,
+    "timeout": 120,
+}
 
-def clean_text(text):
-    """Remove HTML and normalize whitespace."""
 
-    if not text:
+def clean_text(value):
+    """Clean HTML/entities/whitespace while preserving the actual content."""
+    if value is None:
         return ""
 
-    text = str(text)
+    text = html.unescape(str(value))
 
-    # Decode HTML entities
-    text = unescape(text)
-
-    # Remove HTML tags
+    # Remove HTML tags.
     text = re.sub(r"<[^>]+>", " ", text)
 
-    # Remove common RSS noise
-    text = re.sub(
-        r"Also Read\s*:.*$",
-        "",
-        text,
-        flags=re.IGNORECASE | re.DOTALL
-    )
+    # Normalize whitespace.
+    text = re.sub(r"\s+", " ", text).strip()
 
-    # Remove Instagram embed noise
-    text = re.sub(
-        r"Instagram.*?$",
-        "",
-        text,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-
-    # Normalize whitespace
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
+    return text
 
 
-def shorten_text(text, max_chars):
-    """Shorten text without cutting a word."""
+def clean_headline(value):
+    """Clean a headline without unnecessarily shortening it."""
+    text = clean_text(value)
 
-    text = clean_text(text)
-
-    if len(text) <= max_chars:
+    if len(text) <= HEADLINE_MAX_CHARS:
         return text
 
-    shortened = text[:max_chars]
+    # Prefer cutting at a word boundary.
+    shortened = text[:HEADLINE_MAX_CHARS].rsplit(" ", 1)[0].strip()
 
-    if " " in shortened:
-        shortened = shortened.rsplit(" ", 1)[0]
-
-    return shortened.rstrip(".,;:-") + "..."
+    return shortened if shortened else text[:HEADLINE_MAX_CHARS].strip()
 
 
-def clean_headline(title):
-    """Create a shorter Instagram-friendly headline."""
+def safety_limit_summary(text):
+    """
+    Prevent runaway model output.
 
-    title = clean_text(title)
+    Important:
+    We deliberately DO NOT use the old 450-character truncation here.
+    A normal Qwen summary should pass through untouched.
+    """
+    text = clean_text(text)
 
-    if len(title) <= HEADLINE_MAX_CHARS:
-        return title
+    if len(text) <= SUMMARY_SAFETY_MAX_CHARS:
+        return text
 
-    separators = [
-        " | ",
-        " — ",
-        " – ",
-        " - ",
-        "; "
-    ]
-
-    for separator in separators:
-
-        parts = title.split(separator)
-
-        if len(parts) > 1:
-
-            candidate = parts[0].strip()
-
-            if 35 <= len(candidate) <= HEADLINE_MAX_CHARS:
-                return candidate
-
-    return shorten_text(
-        title,
-        HEADLINE_MAX_CHARS
-    )
+    # Only truncate if Qwen clearly ignored the requested summary length.
+    shortened = text[:SUMMARY_SAFETY_MAX_CHARS].rsplit(" ", 1)[0].strip()
+    return shortened + "..."
 
 
-def slugify(text, max_length=70):
-    """Create filesystem-safe folder/file names."""
-
-    text = clean_text(text).lower()
-
-    text = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        text
-    )
-
-    text = text.strip("_")
-
-    return text[:max_length]
+def slugify(value):
+    value = clean_text(value).lower()
+    value = re.sub(r"[^a-z0-9_-]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value or "category"
 
 
-# ============================================================
-# Config loader
-# ============================================================
+def load_config(config_path):
+    path = Path(config_path)
 
-def load_config(config_file):
-    """Load config.yaml."""
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
 
-    config_path = Path(config_file)
-
-    if not config_path.exists():
-        raise FileNotFoundError(
-            f"Config file not found: {config_path}"
-        )
-
-    with open(
-        config_path,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        config = yaml.safe_load(f)
-
-    if not config:
-        raise ValueError(
-            "config.yaml is empty."
-        )
+    with path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
 
     return config
 
 
-# ============================================================
-# Source JSON loader
-# ============================================================
-
 def get_source_json_path(config):
-    """
-    Build source JSON path from:
+    output_cfg = config.get("output", {})
 
-    output.folder
-    output.filename
-    """
+    folder = output_cfg.get("folder")
+    filename = output_cfg.get("filename")
 
-    output_config = config.get("output", {})
-
-    output_folder = output_config.get("folder")
-    output_filename = output_config.get("filename")
-
-    if not output_folder:
+    if not folder or not filename:
         raise ValueError(
-            "Missing output.folder in config.yaml"
+            "config.yaml must contain output.folder and output.filename"
         )
 
-    if not output_filename:
-        raise ValueError(
-            "Missing output.filename in config.yaml"
-        )
-
-    return Path(output_folder) / output_filename
+    return Path(folder) / filename
 
 
-def load_source_json(json_path):
+def load_source_json(path):
+    if not path.exists():
+        raise FileNotFoundError(f"Source JSON not found: {path}")
 
-    if not json_path.exists():
-
-        raise FileNotFoundError(
-            f"Source JSON not found:\n{json_path}"
-        )
-
-    print()
-    print(f"Reading source JSON:")
-    print(f"  {json_path}")
-
-    with open(
-        json_path,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
+    with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
-
-# ============================================================
-# Ollama / Qwen
-# ============================================================
-
 def get_qwen_config(config):
-    qwen_config = config.get("qwen", {})
+    qwen_cfg = config.get("qwen", {}) or {}
 
-    return {
-        "url": qwen_config.get(
-            "ollama_url",
-            "http://localhost:11434"
-        ),
-        "model": qwen_config.get(
-            "model",
-            "qwen3:8b"
-        ),
-        "temperature": qwen_config.get(
-            "temperature",
-            0.2
-        ),
-        "timeout": qwen_config.get(
-            "timeout",
-            120
-        )
-    }
+    result = DEFAULT_QWEN_CONFIG.copy()
+    result.update(qwen_cfg)
+
+    return result
 
 
-def check_ollama(qwen_config):
-    url = (
-        qwen_config["url"].rstrip("/")
-        + "/api/tags"
-    )
-
-    print("\nChecking Ollama...")
+def check_ollama(ollama_url, timeout=10):
+    """Check whether Ollama is reachable."""
+    url = ollama_url.rstrip("/") + "/api/tags"
 
     try:
-        response = requests.get(
-            url,
-            timeout=10
-        )
+        response = requests.get(url, timeout=timeout)
         response.raise_for_status()
-
-        models = response.json().get(
-            "models",
-            []
-        )
-
-        model_names = [
-            model.get("name")
-            for model in models
-        ]
-
-        requested_model = qwen_config["model"]
-
-        if requested_model not in model_names:
-            print(
-                f"WARNING: Model '{requested_model}' "
-                "was not found."
-            )
-            print("Available models:")
-
-            for name in model_names:
-                print(f"  - {name}")
-
-            return False
-
-        print("Ollama OK")
-        print(f"Model: {requested_model}")
-
         return True
-
-    except Exception as e:
-        print(f"WARNING: Cannot connect to Ollama: {e}")
+    except requests.RequestException as exc:
+        print(f"[WARN] Ollama is not reachable: {exc}")
         return False
 
 
-def qwen_summarize(title, description, qwen_config):
+def strip_thinking(text):
     """
-    Use local Ollama/Qwen to generate an Instagram headline
-    and a meaningful 2-3 sentence summary.
+    Qwen3 may return:
+        <think>...</think>
+        {"headline": "...", ...}
+
+    Remove the thinking section before JSON parsing.
+    """
+    if not text:
+        return ""
+
+    text = re.sub(
+        r"<think>.*?</think>",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    return text.strip()
+
+
+def strip_markdown_json_fence(text):
+    """Remove ```json ... ``` if the model adds Markdown fences."""
+    text = text.strip()
+
+    match = re.match(
+        r"^```(?:json)?\s*(.*?)\s*```$",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    if match:
+        return match.group(1).strip()
+
+    return text
+
+
+def parse_qwen_json(raw_text):
+    """
+    Parse Qwen JSON robustly.
+
+    Handles:
+    - <think>...</think>
+    - Markdown JSON fences
+    - occasional text before/after the JSON object
+    """
+    text = strip_thinking(raw_text)
+    text = strip_markdown_json_fence(text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting the first JSON object.
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start >= 0 and end > start:
+        candidate = text[start : end + 1]
+
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(
+        "Could not parse valid JSON from Qwen response.\n"
+        f"Raw response:\n{text}"
+    )
+
+
+def qwen_summarize(
+    title,
+    description,
+    ollama_url,
+    model,
+    temperature=0.2,
+    timeout=120,
+):
+    """
+    Ask Qwen to produce:
+    - a cleaned Instagram headline
+    - an English 60-90 word summary
+    - a Hindi 60-90 word summary
     """
 
     title = clean_text(title)
     description = clean_text(description)
 
     prompt = f"""
-You are an experienced Bollywood entertainment news editor.
-
-Create Instagram-ready content from the source article below.
+You are an editorial assistant preparing Bollywood entertainment news
+for an Instagram carousel.
 
 SOURCE TITLE:
 {title}
 
-SOURCE DESCRIPTION:
+SOURCE ARTICLE:
 {description}
 
-Return ONLY valid JSON in exactly this format:
+TASK:
+Create an accurate, concise editorial version of this story.
 
+Return ONLY a JSON object with exactly these keys:
 {{
-  "headline": "short Instagram headline",
-  "summary": "meaningful 2-3 sentence summary"
+  "headline": "string",
+  "summary": "string",
+  "summary_hindi": "string"
 }}
 
-Rules:
-1. Preserve the facts in the source.
-2. Do not invent information.
-3. Do not speculate.
-4. Identify the main news or event.
-5. Mention important people, films, dates or numbers when present.
-6. Remove unnecessary repetition.
-7. Remove promotional language.
-8. Use simple, natural English.
-9. The headline should be concise and attention-grabbing.
-10. The summary should explain the actual story rather than mechanically shortening it.
-11. Headline maximum approximately 110 characters.
-12. Summary maximum approximately 450 characters.
-13. Do not use emojis.
-14. Do not add hashtags.
-15. Return ONLY JSON. Do not include explanations.
+RULES FOR headline:
+- Rewrite the source title into a clear, engaging news headline.
+- Keep the key person/movie/show/event.
+- Do not use clickbait.
+- Maximum about 100 characters.
+
+RULES FOR summary:
+- Write approximately 60-90 words.
+- Use exactly 3 concise sentences where possible.
+- Capture the main development and the most important supporting details.
+- Preserve names, titles, dates, roles and other facts present in the source.
+- Do NOT simply copy the article.
+- Do NOT end with "..." or truncate the story.
+- Do NOT invent facts.
+- Do NOT add opinions or speculation not supported by the source.
+
+RULES FOR summary_hindi:
+- Translate/adapt the SAME facts into natural Hindi written in Devanagari.
+- Approximately 60-90 words.
+- Use exactly 3 concise sentences where possible.
+- Do NOT use Roman Hindi.
+- Do NOT invent facts or add information.
+- Keep names, movie/show titles and necessary proper nouns recognizable.
+
+IMPORTANT:
+The output must be complete and self-contained.
+Do not truncate the summary merely to meet a character limit.
+Return valid JSON only.
 """
 
-    endpoint = (
-        qwen_config["url"].rstrip("/")
-        + "/api/generate"
-    )
+    endpoint = ollama_url.rstrip("/") + "/api/generate"
 
     payload = {
-        "model": qwen_config["model"],
+        "model": model,
         "prompt": prompt,
         "stream": False,
         "format": "json",
         "options": {
-            "temperature": qwen_config["temperature"]
-        }
+            "temperature": temperature,
+        },
     }
 
     response = requests.post(
         endpoint,
         json=payload,
-        timeout=qwen_config["timeout"]
+        timeout=timeout,
     )
+
     response.raise_for_status()
 
     result = response.json()
 
-    raw_response = result.get(
-        "response",
-        ""
-    )
+    raw_response = result.get("response", "")
 
     if not raw_response:
-        raise ValueError(
-            "Ollama returned an empty response."
-        )
+        raise ValueError("Ollama returned an empty response.")
 
-    # Qwen3 may return internal reasoning in <think>...</think>.
-    # Remove it before parsing the JSON answer.
-    raw_response = re.sub(
-        r"<think>.*?</think>",
-        "",
-        raw_response,
-        flags=re.IGNORECASE | re.DOTALL
-    ).strip()
+    data = parse_qwen_json(raw_response)
 
-    # Remove accidental Markdown JSON fences.
-    raw_response = re.sub(
-        r"^```(?:json)?\s*",
-        "",
-        raw_response,
-        flags=re.IGNORECASE
-    )
-
-    raw_response = re.sub(
-        r"\s*```$",
-        "",
-        raw_response
-    ).strip()
-
-    try:
-        parsed = json.loads(raw_response)
-
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            "Qwen returned invalid JSON after removing "
-            f"<think> content: {raw_response[:1000]}"
-        ) from e
-
-    headline = clean_text(
-        parsed.get("headline", "")
-    )
-
-    summary = clean_text(
-        parsed.get("summary", "")
-    )
+    headline = clean_headline(data.get("headline", ""))
+    summary = safety_limit_summary(data.get("summary", ""))
+    summary_hindi = safety_limit_summary(data.get("summary_hindi", ""))
 
     if not headline:
         headline = clean_headline(title)
 
     if not summary:
-        summary = shorten_text(
-            description,
-            STORY_MAX_CHARS
-        )
+        raise ValueError("Qwen returned an empty English summary.")
+
+    if not summary_hindi:
+        raise ValueError("Qwen returned an empty Hindi summary.")
 
     return {
-        "headline": shorten_text(
-            headline,
-            HEADLINE_MAX_CHARS
-        ),
-        "summary": shorten_text(
-            summary,
-            STORY_MAX_CHARS
-        )
+        "headline": headline,
+        "summary": summary,
+        "summary_hindi": summary_hindi,
     }
 
 
-# ============================================================
-# Story conversion
-# ============================================================
+def extract_story_fields(story):
+    """
+    Handle the expected Bollywood Hungama story structure while allowing
+    small variations in field names.
+    """
+    title = (
+        story.get("title")
+        or story.get("headline")
+        or story.get("name")
+        or ""
+    )
 
-def convert_story(
+    description = (
+        story.get("description")
+        or story.get("summary")
+        or story.get("content")
+        or ""
+    )
+
+    return {
+        "title": clean_text(title),
+        "description": clean_text(description),
+        "published_at": story.get("published_at")
+        or story.get("pubDate")
+        or story.get("published")
+        or "",
+        "image_url": story.get("image_url")
+        or story.get("image")
+        or story.get("thumbnail")
+        or "",
+        "source_url": story.get("source_url")
+        or story.get("link")
+        or story.get("url")
+        or "",
+    }
+
+
+def build_slide(
     story,
-    category_name,
+    category_key,
+    category_cfg,
     slide_number,
     total_slides,
-    qwen_config,
-    ollama_available
+    qwen_result,
+    timezone,
 ):
-    """Convert one story into Qwen JSON."""
-
-    title = story.get(
-        "title",
-        ""
-    )
-
-    description = story.get(
-        "description",
-        ""
-    )
+    fields = extract_story_fields(story)
 
     category_label = (
-        story.get("category")
-        or category_name.replace(
-            "_",
-            " "
-        ).title()
+        category_cfg.get("label")
+        or category_cfg.get("heading")
+        or category_key.replace("_", " ").title()
     )
 
-    heading = story.get(
-        "heading",
-        ""
+    heading = (
+        category_cfg.get("heading")
+        or category_label
     )
 
-    result = {
+    published_at = fields["published_at"]
 
+    published_date = ""
+    published_time = ""
+
+    if published_at:
+        published_text = str(published_at)
+
+        # Keep this intentionally simple; source formatting remains intact.
+        if "T" in published_text:
+            published_date, published_time = published_text.split("T", 1)
+            published_time = published_time.replace("Z", "")
+        elif " " in published_text:
+            parts = published_text.split(" ", 1)
+            published_date = parts[0]
+            published_time = parts[1]
+
+    return {
         "slide": {
-
             "number": slide_number,
-
             "total_slides": total_slides,
-
-            "category": category_name,
-
+            "category": category_key,
             "category_label": category_label,
-
-            "heading": clean_text(
-                heading
-            ),
-
-            "headline": clean_headline(
-                title
-            ),
-
-            "story": shorten_text(
-                description,
-                STORY_MAX_CHARS
-            ),
-
-            "published_at": story.get(
-                "published_at"
-            ),
-
-            "published_date": story.get(
-                "published_date"
-            ),
-
-            "published_time": story.get(
-                "published_time"
-            ),
-
-            "timezone": story.get(
-                "timezone"
-            ),
-
-            "image_url": story.get(
-                "image"
-            ),
-
-            "source_url": story.get(
-                "url"
-            )
+            "heading": heading,
+            "headline": qwen_result["headline"],
+            "story": qwen_result["summary"],
+            "story_hindi": qwen_result["summary_hindi"],
+            "published_at": published_at,
+            "published_date": published_date,
+            "published_time": published_time,
+            "timezone": timezone,
+            "image_url": fields["image_url"],
+            "source_url": fields["source_url"],
+            "content_source": "qwen",
         },
-
+        "source": {
+            "title": fields["title"],
+            "description": fields["description"],
+        },
         "qwen": {
-
-            "task":
-                "instagram_carousel_slide",
-
+            "task": "instagram_carousel_slide",
+            "model": None,
             "format": {
-
                 "aspect_ratio": "9:16",
-
                 "width": 1080,
-
-                "height": 1350
+                "height": 1920,
             },
-
-            "language": "English",
-
-            "visual_style":
-                "Bold Bollywood entertainment news, "
-                "dark cinematic background, "
-                "high contrast, "
-                "modern Instagram design.",
-
+            "language": "English + Hindi",
+            "visual_style": (
+                "Bold Bollywood entertainment news, dark cinematic background, "
+                "high contrast, modern Instagram design."
+            ),
             "use_source_image": True,
-
             "rules": [
-
-                "Use the supplied source image as the primary visual when available.",
-
+                "Use the Qwen headline and summaries as supplied.",
+                "English story is a meaningful editorial summary, not source truncation.",
+                "Hindi story conveys the same facts in natural Devanagari.",
                 "Do not invent facts.",
-
-                "Do not change the meaning of the story.",
-
-                "Keep the headline prominent and readable.",
-
-                "Keep body text concise.",
-
-                "Do not overcrowd the slide.",
-
-                "Maintain strong visual hierarchy.",
-
-                "Keep all important text within safe margins.",
-
-                "Do not add unrelated people or imagery.",
-
-                "Create a polished 9:16 Instagram slide."
-            ]
-        }
+                "Instagram canvas: 1080x1920, 9:16 portrait.",
+            ],
+        },
     }
 
-    return result
 
-
-# ============================================================
-# Category processing
-# ============================================================
-
-def process_category(
-    category_name,
-    category_data,
-    qwen_root,
-    qwen_config,
-    ollama_available
-):
+def get_stories_for_category(category_data):
     """
-    Process ONE category.
-
     IMPORTANT:
-    slide numbering starts from 1 for every category.
+    Use categories -> stories[].
+
+    Do not use all_stories[] because that can duplicate stories.
     """
+    stories = category_data.get("stories", [])
 
-    stories = category_data.get(
-        "stories",
-        []
-    )
+    if isinstance(stories, list):
+        return stories
 
-    if not stories:
+    return []
 
-        print(
-            f"\n[SKIP] {category_name}: "
-            f"no stories"
-        )
 
-        return 0
+def convert_category(
+    category_key,
+    category_data,
+    output_root,
+    qwen_cfg,
+    timezone,
+    category_cfg,
+):
+    stories = get_stories_for_category(category_data)
 
-    category_folder = (
-        qwen_root
-        / slugify(category_name)
-    )
+    category_dir = output_root / slugify(category_key)
+    category_dir.mkdir(parents=True, exist_ok=True)
 
-    category_folder.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    # Remove old slide JSON files so stale slides do not remain.
+    for old_file in category_dir.glob("slide_*.json"):
+        old_file.unlink()
 
     total_slides = len(stories)
 
-    combined_slides = []
+    category_manifest = {
+        "category": category_key,
+        "category_label": (
+            category_cfg.get("label")
+            or category_cfg.get("heading")
+            or category_key.replace("_", " ").title()
+        ),
+        "total_slides": total_slides,
+        "format": {
+            "aspect_ratio": "9:16",
+            "width": 1080,
+            "height": 1920,
+        },
+        "slides": [],
+    }
 
     print()
-    print(
-        "=" * 60
-    )
+    print("=" * 70)
+    print(f"Category: {category_key}")
+    print(f"Stories : {total_slides}")
+    print("=" * 70)
 
-    print(
-        f"CATEGORY: {category_name}"
-    )
+    for index, story in enumerate(stories, start=1):
+        fields = extract_story_fields(story)
 
-    print(
-        f"Stories : {total_slides}"
-    )
+        print(
+            f"[{index:02d}/{total_slides:02d}] "
+            f"Qwen processing: {fields['title'][:90]}"
+        )
 
-    print(
-        "=" * 60
-    )
+        try:
+            qwen_result = qwen_summarize(
+                title=fields["title"],
+                description=fields["description"],
+                ollama_url=qwen_cfg["ollama_url"],
+                model=qwen_cfg["model"],
+                temperature=float(qwen_cfg["temperature"]),
+                timeout=int(qwen_cfg["timeout"]),
+            )
 
-    # --------------------------------------------------------
-    # RESET NUMBERING HERE
-    # --------------------------------------------------------
+            print("    ✓ Qwen summary generated")
 
-    for slide_number, story in enumerate(
-        stories,
-        start=1
-    ):
+        except Exception as exc:
+            print(f"    ⚠ Qwen failed: {exc}")
+            print("    → Using source fallback")
 
-        slide = convert_story(
+            fallback_summary = safety_limit_summary(fields["description"])
+
+            qwen_result = {
+                "headline": clean_headline(fields["title"]),
+                "summary": fallback_summary,
+                "summary_hindi": "",
+            }
+
+        slide = build_slide(
             story=story,
-            category_name=category_name,
-            slide_number=slide_number,
+            category_key=category_key,
+            category_cfg=category_cfg,
+            slide_number=index,
             total_slides=total_slides,
-            qwen_config=qwen_config,
-            ollama_available=ollama_available
+            qwen_result=qwen_result,
+            timezone=timezone,
         )
 
-        combined_slides.append(
-            slide
-        )
+        slide["qwen"]["model"] = qwen_cfg["model"]
 
-        filename = (
-            f"slide_{slide_number:03d}.json"
-        )
+        slide_path = category_dir / f"slide_{index:03d}.json"
 
-        output_file = (
-            category_folder
-            / filename
-        )
-
-        with open(
-            output_file,
-            "w",
-            encoding="utf-8"
-        ) as f:
-
+        with slide_path.open("w", encoding="utf-8") as f:
             json.dump(
                 slide,
                 f,
                 ensure_ascii=False,
-                indent=2
+                indent=2,
             )
 
-        print(
-            f"  Created: {filename}"
+        category_manifest["slides"].append(
+            {
+                "number": index,
+                "file": slide_path.name,
+                "headline": slide["slide"]["headline"],
+                "source_url": slide["slide"]["source_url"],
+            }
         )
 
-    # --------------------------------------------------------
-    # Category-level JSON
-    # --------------------------------------------------------
+    manifest_path = category_dir / f"{slugify(category_key)}.json"
 
-    category_json = {
-
-        "metadata": {
-
-            "category":
-                category_name,
-
-            "total_slides":
-                total_slides,
-
-            "format":
-                "9:16",
-
-            "width":
-                1080,
-
-            "height":
-                1350
-        },
-
-        "slides":
-            combined_slides
-    }
-
-    combined_file = (
-        category_folder
-        / f"{slugify(category_name)}.json"
-    )
-
-    with open(
-        combined_file,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
+    with manifest_path.open("w", encoding="utf-8") as f:
         json.dump(
-            category_json,
+            category_manifest,
             f,
             ensure_ascii=False,
-            indent=2
+            indent=2,
         )
 
-    print(
-        f"  Created: {combined_file.name}"
-    )
+    return category_manifest
 
-    return total_slides
-
-
-# ============================================================
-# Main conversion
-# ============================================================
-
-def convert(config_file):
-
-    # --------------------------------------------------------
-    # Load YAML
-    # --------------------------------------------------------
-
-    config = load_config(
-        config_file
-    )
-
-    # --------------------------------------------------------
-    # Get source JSON path
-    # --------------------------------------------------------
-
-    source_json = get_source_json_path(
-        config
-    )
-
-    # --------------------------------------------------------
-    # Read source JSON
-    # --------------------------------------------------------
-
-    data = load_source_json(
-        source_json
-    )
-
-    # --------------------------------------------------------
-    # Qwen configuration
-    # --------------------------------------------------------
-
-    qwen_config = get_qwen_config(config)
-
-    print()
-    print("Qwen configuration:")
-    print(f"  Ollama : {qwen_config['url']}")
-    print(f"  Model  : {qwen_config['model']}")
-
-    ollama_available = check_ollama(
-        qwen_config
-    )
-
-    # --------------------------------------------------------
-    # Get categories
-    # --------------------------------------------------------
-
-    categories = data.get(
-        "categories",
-        {}
-    )
-
-    if not isinstance(
-        categories,
-        dict
-    ):
-
-        raise ValueError(
-            "The source JSON does not contain "
-            "a valid 'categories' object."
-        )
-
-    # --------------------------------------------------------
-    # Output:
-    #
-    # OP_JSON/
-    #     qwen_input/
-    #         news/
-    #         features/
-    #         ...
-    # --------------------------------------------------------
-
-    output_folder = Path(
-        config["output"]["folder"]
-    )
-
-    qwen_root = (
-        output_folder
-        / QWEN_SUBFOLDER
-    )
-
-    qwen_root.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    print()
-    print(
-        f"Qwen output folder:"
-    )
-
-    print(
-        f"  {qwen_root}"
-    )
-
-    # --------------------------------------------------------
-    # Process categories
-    # --------------------------------------------------------
-
-    summary = {}
-
-    for category_name, category_data in categories.items():
-
-        count = process_category(
-            category_name=category_name,
-            category_data=category_data,
-            qwen_root=qwen_root,
-            qwen_config=qwen_config,
-            ollama_available=ollama_available
-        )
-
-        summary[
-            category_name
-        ] = count
-
-    # --------------------------------------------------------
-    # Manifest
-    # --------------------------------------------------------
-
-    manifest = {
-
-        "source_file":
-            source_json.name,
-
-        "source_path":
-            str(source_json),
-
-        "output_path":
-            str(qwen_root),
-
-        "qwen": {
-            "enabled": ollama_available,
-            "model": qwen_config["model"],
-            "ollama_url": qwen_config["url"]
-        },
-
-        "categories":
-            summary,
-
-        "total_slides":
-            sum(summary.values())
-    }
-
-    manifest_file = (
-        qwen_root
-        / "manifest.json"
-    )
-
-    with open(
-        manifest_file,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            manifest,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    # --------------------------------------------------------
-    # Final summary
-    # --------------------------------------------------------
-
-    print()
-    print(
-        "=" * 60
-    )
-
-    print(
-        "CONVERSION COMPLETE"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    for category, count in summary.items():
-
-        print(
-            f"{category:25} : {count} slides"
-        )
-
-    print(
-        "-" * 60
-    )
-
-    print(
-        f"{'TOTAL':25} : "
-        f"{sum(summary.values())} slides"
-    )
-
-    print()
-    print(
-        f"Manifest:"
-    )
-
-    print(
-        f"  {manifest_file}"
-    )
-
-
-# ============================================================
-# CLI
-# ============================================================
 
 def main():
-
     parser = argparse.ArgumentParser(
         description=(
-            "BollywoodKoko RSS JSON → "
-            "category-wise Qwen JSON converter"
+            "Convert Bollywood Hungama RSS JSON into category-wise "
+            "Qwen/Ollama Instagram carousel JSON."
         )
     )
 
     parser.add_argument(
-        "-c",
         "--config",
         default=DEFAULT_CONFIG,
-        help=(
-            "Path to config.yaml "
-            "(default: config.yaml)"
-        )
+        help="Path to config.yaml",
+    )
+
+    parser.add_argument(
+        "--no-ollama-check",
+        action="store_true",
+        help="Skip the initial Ollama connectivity check.",
     )
 
     args = parser.parse_args()
 
-    convert(
-        args.config
-    )
+    try:
+        config = load_config(args.config)
+
+        source_json_path = get_source_json_path(config)
+        source_data = load_source_json(source_json_path)
+
+        qwen_cfg = get_qwen_config(config)
+
+        timezone = (
+            config.get("source", {}).get("timezone")
+            or "Asia/Kolkata"
+        )
+
+        output_root = source_json_path.parent / QWEN_SUBFOLDER
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        print(f"Source JSON : {source_json_path}")
+        print(f"Output root : {output_root}")
+        print(f"Ollama URL  : {qwen_cfg['ollama_url']}")
+        print(f"Qwen model  : {qwen_cfg['model']}")
+        print("Format      : 1080x1920 (9:16)")
+
+        if not args.no_ollama_check:
+            if not check_ollama(qwen_cfg["ollama_url"]):
+                print()
+                print(
+                    "[ERROR] Ollama is not reachable. "
+                    "Start Ollama and run the converter again."
+                )
+                sys.exit(1)
+
+        categories = source_data.get("categories", {})
+
+        if not isinstance(categories, dict):
+            raise ValueError(
+                "Expected source JSON structure: categories -> object"
+            )
+
+        manifests = {}
+
+        for category_key, category_data in categories.items():
+            if not isinstance(category_data, dict):
+                continue
+
+            category_cfg = (
+                config.get("feeds", {}).get(category_key, {})
+                or {}
+            )
+
+            manifest = convert_category(
+                category_key=category_key,
+                category_data=category_data,
+                output_root=output_root,
+                qwen_cfg=qwen_cfg,
+                timezone=timezone,
+                category_cfg=category_cfg,
+            )
+
+            manifests[category_key] = manifest
+
+        master_manifest = {
+            "source": {
+                "file": str(source_json_path),
+                "name": config.get("source", {}).get(
+                    "name",
+                    "Bollywood Hungama",
+                ),
+            },
+            "qwen": {
+                "ollama_url": qwen_cfg["ollama_url"],
+                "model": qwen_cfg["model"],
+            },
+            "format": {
+                "aspect_ratio": "9:16",
+                "width": 1080,
+                "height": 1920,
+            },
+            "categories": manifests,
+        }
+
+        master_manifest_path = output_root / "manifest.json"
+
+        with master_manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(
+                master_manifest,
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        print()
+        print("=" * 70)
+        print("CONVERSION COMPLETE")
+        print("=" * 70)
+        print(f"Output: {output_root}")
+        print(f"Manifest: {master_manifest_path}")
+
+    except Exception as exc:
+        print()
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
