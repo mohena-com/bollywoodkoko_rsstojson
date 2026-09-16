@@ -44,6 +44,7 @@ keeps the pipeline deterministic while making the visual design AI-driven.
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
@@ -201,6 +202,81 @@ Do not include <think>.
 """
 
 
+def debug_dir(cfg):
+    output_folder = cfg.get("output", {}).get("folder")
+    if output_folder:
+        d = Path(output_folder) / "qwen_debug"
+    else:
+        d = Path("qwen_debug")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def save_debug_response(cfg, slide_path, stage, raw):
+    """
+    Save the exact Ollama response when debugging is enabled.
+    This is intentionally opt-in so normal runs don't fill the output folder.
+    """
+    if not cfg.get("qwen", {}).get("debug", False):
+        return None
+
+    d = debug_dir(cfg)
+    filename = f"{slide_path.stem}_{stage}.txt"
+    target = d / filename
+    target.write_text(str(raw), encoding="utf-8")
+    return target
+
+
+def print_response_diagnostics(raw, stage):
+    raw = str(raw or "")
+    print(
+        f"    [{stage}] raw response: "
+        f"{len(raw)} chars / {len(raw.split())} words"
+    )
+
+    think_open = raw.lower().count("<think>")
+    think_close = raw.lower().count("</think>")
+    print(
+        f"    [{stage}] think tags: "
+        f"open={think_open}, close={think_close}"
+    )
+
+    first_brace = raw.find("{")
+    last_brace = raw.rfind("}")
+    print(
+        f"    [{stage}] JSON braces: "
+        f"first={{ at {first_brace}, last=}} at {last_brace}"
+    )
+
+    if first_brace >= 0:
+        preview = raw[max(0, first_brace):first_brace + 500]
+        print(f"    [{stage}] JSON preview: {preview[:500]!r}")
+
+
+def inspect_design_structure(design):
+    print(
+        f"    [design] top-level keys: "
+        f"{list(design.keys()) if isinstance(design, dict) else type(design)}"
+    )
+
+    if not isinstance(design, dict):
+        return
+
+    elements = design.get("elements")
+    print(
+        f"    [design] elements type={type(elements).__name__}, "
+        f"count={len(elements) if isinstance(elements, list) else 'N/A'}"
+    )
+
+    if isinstance(elements, list):
+        for i, element in enumerate(elements[:8], 1):
+            print(
+                f"    [element {i}] "
+                f"type={type(element).__name__} "
+                f"value={repr(element)[:500]}"
+            )
+
+
 def strip_thinking(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)
@@ -263,9 +339,11 @@ def parse_json(text: str):
     try:
         return json.loads(candidate)
     except json.JSONDecodeError as e:
+        context = candidate[max(0, e.pos - 250):min(len(candidate), e.pos + 250)]
         raise ValueError(
             f"Qwen returned malformed JSON: {e}. "
-            f"Response excerpt: {candidate[max(0, e.pos-120):e.pos+120]}"
+            f"Character position={e.pos}. "
+            f"Context={context!r}"
         ) from e
 
 
@@ -523,6 +601,9 @@ def design_one(slide, cfg):
         timeout,
     )
 
+    print_response_diagnostics(raw, "primary")
+    save_debug_response(cfg, slide.get("_debug_path", Path("slide.json")), "primary", raw)
+
     try:
         design = parse_json(raw)
     except ValueError as first_error:
@@ -576,8 +657,18 @@ EDITORIAL:
             0.0,
             timeout,
         )
+
+        print_response_diagnostics(raw_retry, "retry")
+        save_debug_response(
+            cfg,
+            slide.get("_debug_path", Path("slide.json")),
+            "retry",
+            raw_retry,
+        )
+
         design = parse_json(raw_retry)
 
+    inspect_design_structure(design)
     validate_design(design)
 
     design["generated_by"] = "qwen"
@@ -596,8 +687,10 @@ def process_file(jf, cfg, force=False):
         return False
 
     print(f"  DESIGN {jf.name} -> Qwen")
+    data["_debug_path"] = jf
 
     design = design_one(data, cfg)
+    data.pop("_debug_path", None)
     data["design"] = design
 
     # Preserve UTF-8, Hindi and English names exactly.
@@ -631,6 +724,11 @@ def main():
         action="store_true",
         help="Regenerate design even when design already exists",
     )
+    ap.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print detailed Qwen response diagnostics and save raw responses.",
+    )
     args = ap.parse_args()
 
     config_path = Path(args.config)
@@ -640,6 +738,9 @@ def main():
 
     with config_path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
+
+    if args.debug:
+        cfg.setdefault("qwen", {})["debug"] = True
 
     output_cfg = cfg.get("output", {})
     output_folder = output_cfg.get("folder")
