@@ -376,7 +376,7 @@ Before returning JSON, silently verify:
 
 RETURN JSON ONLY.
 """
-
+    print(f"    [OLLAMA] {model} (temp={temperature}) {ollama_url}/api/generate")
     response = requests.post(
         ollama_url.rstrip("/") + "/api/generate",
         json={
@@ -390,7 +390,7 @@ RETURN JSON ONLY.
         },
         timeout=timeout,
     )
-
+    print(f"    [OLLAMA] {response.status_code} {response.reason}")
     response.raise_for_status()
 
     result = response.json()
@@ -400,7 +400,7 @@ RETURN JSON ONLY.
         raise ValueError("Ollama returned an empty response.")
 
     design = parse_json(raw)
-
+    print(f"    [DESIGN] {design.get('layout', 'unknown')}")
     # Keep only the fields expected by the renderer.
     allowed = {
         "layout",
