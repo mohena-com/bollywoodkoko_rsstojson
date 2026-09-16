@@ -283,7 +283,7 @@ def ollama_generate(base_url, model, prompt, temperature, timeout):
         "think": False,
         "options": {
             "temperature": temperature,
-            "num_predict": 1000,
+            "num_predict": 800,
         },
     }
 
@@ -295,6 +295,14 @@ def ollama_generate(base_url, model, prompt, temperature, timeout):
 
 
 def validate_design(design):
+    """
+    Validate and normalize Qwen's design specification.
+
+    Qwen is the creative director, so its layout decisions are preserved.
+    The renderer, however, needs predictable element objects. If Qwen omits
+    an optional renderer field, we supply a safe default instead of rejecting
+    the whole slide.
+    """
     required = [
         "layout",
         "story_type",
@@ -329,35 +337,82 @@ def validate_design(design):
         )
 
     if not isinstance(design["emphasis_words"], list):
-        raise ValueError("emphasis_words must be a list")
+        design["emphasis_words"] = []
 
     if not isinstance(design["elements"], list):
-        raise ValueError("elements must be a list")
+        design["elements"] = []
 
     canvas = design["canvas"]
-    if canvas.get("width") != 1080 or canvas.get("height") != 1920:
-        raise ValueError("Canvas must be 1080x1920")
+    canvas["width"] = 1080
+    canvas["height"] = 1920
+    canvas["aspect_ratio"] = "9:16"
 
-    # Validate element coordinates so the renderer gets predictable input.
-    for idx, element in enumerate(design["elements"], 1):
-        for field in ("type", "x", "y", "width", "height"):
-            if field not in element:
-                raise ValueError(f"Element {idx} missing '{field}'")
+    normalized = []
 
-        for field in ("x", "y", "width", "height"):
-            if not isinstance(element[field], int):
-                raise ValueError(
-                    f"Element {idx} field '{field}' must be an integer"
-                )
+    # Safe defaults. These are fallbacks only; Qwen's supplied coordinates
+    # and visual choices are retained whenever they are valid.
+    default_positions = {
+        "badge": (65, 55, 220, 65),
+        "date": (300, 55, 260, 65),
+        "counter": (900, 65, 115, 50),
+        "image": (0, 0, 1080, 800),
+        "headline": (65, 850, 950, 240),
+        "hero_stat": (65, 850, 950, 220),
+        "label": (65, 1080, 950, 70),
+        "story_en": (65, 1160, 950, 260),
+        "story_hi": (65, 1430, 950, 350),
+        "footer": (65, 1830, 950, 55),
+        "accent": (65, 800, 950, 8),
+    }
 
-        if not 0 <= element["x"] <= 1080:
-            raise ValueError(f"Element {idx}: x outside canvas")
-        if not 0 <= element["y"] <= 1920:
-            raise ValueError(f"Element {idx}: y outside canvas")
-        if element["width"] < 1 or element["width"] > 1080:
-            raise ValueError(f"Element {idx}: invalid width")
-        if element["height"] < 1 or element["height"] > 1920:
-            raise ValueError(f"Element {idx}: invalid height")
+    for idx, raw in enumerate(design["elements"], 1):
+        # Accept a string shorthand such as "image" or "headline".
+        if isinstance(raw, str):
+            element = {"type": raw}
+        elif isinstance(raw, dict):
+            element = dict(raw)
+        else:
+            continue
+
+        element_type = str(element.get("type", "")).strip().lower()
+        if not element_type:
+            # Do not let a malformed Qwen element kill the entire slide.
+            continue
+
+        element["type"] = element_type
+
+        x, y, w, h = default_positions.get(
+            element_type,
+            (65, 850, 950, 120)
+        )
+
+        def safe_int(value, fallback):
+            try:
+                return int(round(float(value)))
+            except (TypeError, ValueError):
+                return fallback
+
+        element["x"] = safe_int(element.get("x"), x)
+        element["y"] = safe_int(element.get("y"), y)
+        element["width"] = safe_int(element.get("width"), w)
+        element["height"] = safe_int(element.get("height"), h)
+
+        element["x"] = max(0, min(1080, element["x"]))
+        element["y"] = max(0, min(1920, element["y"]))
+        element["width"] = max(1, min(1080 - element["x"], element["width"]))
+        element["height"] = max(1, min(1920 - element["y"], element["height"]))
+
+        element.setdefault("text", "")
+        element.setdefault("font_size", 32)
+        element.setdefault("font_weight", "regular")
+        element.setdefault("language", "none")
+        element.setdefault("align", "left")
+        element.setdefault("opacity", 255)
+        element.setdefault("style", "")
+
+        normalized.append(element)
+
+    design["elements"] = normalized[:8]
 
     return True
 
@@ -441,6 +496,8 @@ Remember:
 - make the design story-specific
 - return JSON only
 - Keep the response compact: maximum 8 visual elements.
+- Every element MUST be a JSON object with a non-empty 'type'.
+- Never return an element as null, a number, an array, or an empty object.
 - Do not explain your reasoning.
 - design_notes must be one short sentence.
 - Do not put comments or trailing commas in JSON.
@@ -478,8 +535,8 @@ The previous response for this slide could not be parsed:
 {str(first_error)}
 
 Recreate the same slide design using the schema and editorial content below.
-Keep it compact: maximum 7 elements. Every element must have integer
-x, y, width, height values within 1080x1920.
+Keep it compact: maximum 7 elements. Every element should have integer x, y, width, height values within
+1080x1920. If unsure, use the safe default element coordinates from the schema.
 
 SCHEMA:
 {json.dumps({
