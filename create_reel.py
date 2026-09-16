@@ -64,6 +64,24 @@ def get_category_reel_output(config, category: str):
     return Path(output_folder) / "reels" / category / f"{category}_reel.mp4"
 
 
+def get_categories(slides_root: Path):
+    """Return category directories containing slide_*.png files."""
+    if not slides_root.exists():
+        return []
+
+    categories = []
+    for p in sorted(slides_root.iterdir()):
+        if not p.is_dir():
+            continue
+        if any(
+            f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+            and f.name.startswith("slide_")
+            for f in p.iterdir()
+        ):
+            categories.append(p)
+    return categories
+
+
 def get_audio_files(music_dir: Path):
     valid_exts = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
     files = [
@@ -172,32 +190,15 @@ def parse_args():
     ap.add_argument("--output", type=Path, default=None, help="Output MP4 path")
     ap.add_argument("--duration-per-slide", type=float, default=None, help="Seconds to display each slide")
     ap.add_argument("--category", type=str, default=None,
-                    help="Category to render, e.g. news, features, movie_reviews")
+                    help="Create only this category, e.g. news. If omitted, create reels for all categories.")
     return ap.parse_args()
 
 
 def main():
     args = parse_args()
-
     config = load_config(args.config)
 
-    # Normal mode is category-driven:
-    #   painted_slides/<category>/slide_*.png
-    #       -> reels/<category>/<category>_reel.mp4
-    #
-    # Explicit --slides-dir / --output still work as overrides.
-    category = args.category.strip() if args.category else None
-
-    if category:
-        slides_dir = args.slides_dir or get_category_slides_dir(config, category)
-        output_path = args.output or get_category_reel_output(config, category)
-    else:
-        slides_dir = args.slides_dir or get_slides_dir(config)
-        output_path = args.output or (
-            Path(str(config.get("output", {}).get("folder", ".")))
-            / DEFAULT_OUTPUT
-        )
-
+    slides_root = get_slides_dir(config)
     music_dir = args.music_dir or get_music_dir(config)
 
     duration = (
@@ -209,10 +210,83 @@ def main():
         )
     )
 
-    output_path = Path(output_path)
-
     try:
-        build_reel(slides_dir, music_dir, output_path, duration_per_slide=duration)
+        # Explicit category: create only that category's reel.
+        if args.category:
+            category = args.category.strip()
+            slides_dir = args.slides_dir or get_category_slides_dir(
+                config, category
+            )
+            output_path = args.output or get_category_reel_output(
+                config, category
+            )
+
+            build_reel(
+                slides_dir,
+                music_dir,
+                Path(output_path),
+                duration_per_slide=duration,
+            )
+            return
+
+        # No category: automatically create a reel for every category
+        # under painted_slides/.
+        if args.slides_dir:
+            # If the user explicitly supplies --slides-dir without --category,
+            # preserve the old single-reel behavior.
+            output_path = args.output or (
+                Path(str(config.get("output", {}).get("folder", ".")))
+                / DEFAULT_OUTPUT
+            )
+            build_reel(
+                args.slides_dir,
+                music_dir,
+                Path(output_path),
+                duration_per_slide=duration,
+            )
+            return
+
+        categories = get_categories(slides_root)
+
+        if not categories:
+            raise FileNotFoundError(
+                f"No category slide folders found in: {slides_root}"
+            )
+
+        print(f"Found {len(categories)} category folder(s) in: {slides_root}")
+
+        success = 0
+        failures = 0
+
+        for category_dir in categories:
+            category = category_dir.name
+            output_path = get_category_reel_output(config, category)
+
+            print(f"\n=== Category: {category} ===")
+
+            try:
+                build_reel(
+                    category_dir,
+                    music_dir,
+                    output_path,
+                    duration_per_slide=duration,
+                )
+                success += 1
+            except Exception as exc:
+                failures += 1
+                print(
+                    f"[ERROR] Category '{category}' failed: {exc}",
+                    file=sys.stderr,
+                )
+
+        print(
+            f"\nCompleted: {success} reel(s) created, "
+            f"{failures} failed."
+        )
+
+        if failures:
+            raise SystemExit(1)
+
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         raise SystemExit(1)
