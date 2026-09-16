@@ -40,5 +40,5 @@ feeds:
 
 output:
   # Change this to your desired external output folder.
-  folder: "C:/Sanjeev/00_ML-AI-POCs/POJO_PROJECT/BollywoodKoko/OP_JSON"
+  folder: "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/bollywood/OP_JSON"
   filename: "bollywood_hungama_today.json"
