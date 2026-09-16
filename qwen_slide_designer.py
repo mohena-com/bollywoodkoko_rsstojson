@@ -165,8 +165,9 @@ Specify relative positions using percentages of the 1080x1920 canvas.
 Coordinates must be integers:
 - x: 0..1080
 - y: 0..1920
-- width: 100..1080
-- height: 40..1000
+- width: 1..1080
+- height: 1..1920
+- A full-bleed image may legitimately be 1080x1920.
 
 Font sizes are in pixels.
 
@@ -230,8 +231,13 @@ def ollama_generate(base_url, model, prompt, temperature, timeout):
         "prompt": prompt,
         "stream": False,
         "format": "json",
+        # Qwen3 can spend substantial time generating a hidden reasoning
+        # trace. Slide design is a constrained JSON task, so disable thinking
+        # when supported by the installed Ollama version.
+        "think": False,
         "options": {
             "temperature": temperature,
+            "num_predict": 1400,
         },
     }
 
@@ -302,9 +308,9 @@ def validate_design(design):
             raise ValueError(f"Element {idx}: x outside canvas")
         if not 0 <= element["y"] <= 1920:
             raise ValueError(f"Element {idx}: y outside canvas")
-        if element["width"] < 100 or element["width"] > 1080:
+        if element["width"] < 1 or element["width"] > 1080:
             raise ValueError(f"Element {idx}: invalid width")
-        if element["height"] < 40 or element["height"] > 1000:
+        if element["height"] < 1 or element["height"] > 1920:
             raise ValueError(f"Element {idx}: invalid height")
 
     return True
@@ -354,15 +360,15 @@ def build_prompt(slide):
                 "type": "badge|date|counter|image|headline|hero_stat|label|story_en|story_hi|footer|accent",
                 "x": 0,
                 "y": 0,
-                "width": 100,
-                "height": 100,
+                "width": 1080,
+                "height": 1920,
                 "text": "only when applicable",
                 "font_size": 32,
                 "font_weight": "regular|bold",
                 "language": "none|english|hindi",
                 "align": "left|center|right",
                 "opacity": 255,
-                "style": "short rendering instruction",
+                "style": "very short rendering instruction",
             }
         ],
         "design_notes": "concise instructions for the renderer",
@@ -388,6 +394,9 @@ Remember:
 - use only supplied facts
 - make the design story-specific
 - return JSON only
+- Keep the response compact: maximum 8 visual elements.
+- Do not explain your reasoning.
+- design_notes must be one short sentence.
 """
 
 
@@ -397,7 +406,7 @@ def design_one(slide, cfg):
     ollama_url = qwen_cfg.get("ollama_url", "http://localhost:11434")
     model = qwen_cfg.get("model", "qwen3:8b")
     temperature = float(qwen_cfg.get("temperature", 0.2))
-    timeout = int(qwen_cfg.get("timeout", 120))
+    timeout = int(qwen_cfg.get("timeout", 180))
 
     prompt = build_prompt(slide)
 
