@@ -495,25 +495,13 @@ def render_standard(draw, s, design, fonts, width, height, scale):
     card_top = int(height * 0.39)
     card_bottom = int(height * 0.91)
 
-    rounded_panel(
-        draw,
-        (
-            margin - int(14 * scale),
-            card_top,
-            width - margin + int(14 * scale),
-            card_bottom,
-        ),
-        int(26 * scale),
-        (0, 0, 0, 190),
-    )
-
     x = margin
     y = card_top + int(28 * scale)
 
     y, _, _ = draw_wrapped(
         draw, headline, x, y,
         fonts["headline"], maxw, "white",
-        int(9 * scale),
+        int(15 * scale),
         max_lines=4,
     )
 
@@ -522,7 +510,7 @@ def render_standard(draw, s, design, fonts, width, height, scale):
     y, _, _ = draw_wrapped(
         draw, story_en, x, y,
         fonts["story"], maxw, (245, 245, 245, 255),
-        int(8 * scale),
+        int(13 * scale),
         max_lines=6,
     )
 
@@ -537,7 +525,7 @@ def render_standard(draw, s, design, fonts, width, height, scale):
         draw_wrapped(
             draw, story_hi, x, y,
             fonts["hindi"], maxw, (245, 245, 245, 255),
-            int(8 * scale),
+            int(13 * scale),
             max_lines=7,
         )
 
@@ -904,7 +892,7 @@ def render(data, output, width, height):
         "cat": make_font(int(27 * scale), bold=True),
         "slide": make_font(int(23 * scale)),
         "footer": make_font(int(21 * scale)),
-        "headline": make_font(int(50 * scale), bold=True),
+        "headline": make_font(int(55 * scale), bold=True),
         "headline_medium": make_font(int(37 * scale), bold=True),
         "headline_large": make_font(int(54 * scale), bold=True),
         "hero_headline": make_font(int(57 * scale), bold=True),
