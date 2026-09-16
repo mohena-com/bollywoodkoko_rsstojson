@@ -900,7 +900,7 @@ def render(data, output, width, height):
         "story": make_font(int(28 * scale)),
         "story_small": make_font(int(36 * scale)),
         "hindi_label": make_font(int(22 * scale), hindi=True, bold=True),
-        "hindi": make_font(int(27 * scale), hindi=True),
+        "hindi": make_font(int(50 * scale), hindi=True),
         "hindi_small": make_font(int(35 * scale), hindi=True),
         "label": make_font(int(21 * scale), bold=True),
     }
