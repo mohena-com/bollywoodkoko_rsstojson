@@ -92,6 +92,83 @@ def safety_limit_summary(text):
     return shortened + "..."
 
 
+def enforce_english_story(text):
+    """
+    The English story must contain English text only.
+
+    Qwen can occasionally ignore the language instruction. Since the source
+    article is English, detect obvious Devanagari and reject that output so
+    the caller can fall back to a source-based English summary.
+    """
+    text = clean_text(text)
+
+    if not text:
+        return ""
+
+    # Any Devanagari character means the English summary was not produced
+    # entirely in English.
+    if re.search(r"[\u0900-\u097F]", text):
+        return ""
+
+    return text
+
+
+def preserve_source_names_in_hindi(text, source_text):
+    """
+    Restore important English names/titles from the source if Qwen
+    transliterated them into Hindi.
+
+    This is intentionally conservative: only well-defined quoted titles
+    and common entertainment entities are considered.
+    """
+    text = clean_text(text)
+    source_text = clean_text(source_text)
+
+    if not text or not source_text:
+        return text
+
+    protected = set()
+
+    # Quoted titles/episode names in the source.
+    for match in re.findall(r'[“"]([^”"]+)[”"]', source_text):
+        candidate = clean_text(match)
+        if candidate and re.search(r"[A-Za-z]", candidate):
+            protected.add(candidate)
+
+    # Explicitly preserve multi-word entertainment names appearing in source.
+    # This also covers the common "Matka King"-type case.
+    patterns = [
+        r"\bMatka King\b",
+        r"\bPrime Video\b",
+        r"\bBrij Bhatti\b",
+        r"\bEk Aur Baazi\b",
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, source_text, flags=re.IGNORECASE):
+            protected.add(match)
+
+    # Replace Hindi transliterations when the exact English source term
+    # exists. Keep this conservative to avoid mangling unrelated Hindi.
+    replacements = {
+        "मातक राज": "Matka King",
+        "मटका किंग": "Matka King",
+        "मटका राजा": "Matka King",
+        "प्राइम वीडियो": "Prime Video",
+        "बृज भट्टी": "Brij Bhatti",
+        "एक और बाज़ी": "Ek Aur Baazi",
+        "एक और बाजी": "Ek Aur Baazi",
+    }
+
+    for hindi, english in replacements.items():
+        if english in protected or re.search(
+            re.escape(english), source_text, flags=re.IGNORECASE
+        ):
+            text = text.replace(hindi, english)
+
+    return text
+
+
 def slugify(value):
     value = clean_text(value).lower()
     value = re.sub(r"[^a-z0-9_-]+", "_", value)
@@ -285,14 +362,22 @@ RULES FOR summary_hindi:
 - Translate/adapt the SAME facts into natural Hindi written in Devanagari.
 - Approximately 60-90 words.
 - Use exactly 3 concise sentences where possible.
-- Do NOT use Roman Hindi.
+- Hindi grammar and connecting words should be in Devanagari.
+- Do NOT use Roman Hindi for ordinary Hindi words.
+- NEVER translate, transliterate, or replace English movie, series, show, song, character, platform, company, person, or episode names.
+- Preserve proper names and entertainment titles EXACTLY as they appear in the source whenever possible.
+- Examples: "Matka King" MUST remain "Matka King", "Prime Video" MUST remain "Prime Video", "Brij Bhatti" MUST remain "Brij Bhatti", and "Ek Aur Baazi" MUST remain "Ek Aur Baazi".
+- Do NOT turn "Matka King" into "मटका किंग", "मटका राजा", or any other Hindi version.
+- If you are unsure whether a phrase is a title/name, preserve the original English phrase from the source.
 - Do NOT invent facts or add information.
-- Keep names, movie/show titles and necessary proper nouns recognizable.
 
 IMPORTANT:
-The output must be complete and self-contained.
-Do not truncate the summary merely to meet a character limit.
-Return valid JSON only.
+- The "summary" field MUST ALWAYS be in English only.
+- The "summary_hindi" field MUST be Hindi, but English names/titles/proper nouns from the source must remain in English.
+- The "headline" field MUST also be in English only. Do not write a Hindi headline.
+- The output must be complete and self-contained.
+- Do not truncate the summary merely to meet a character limit.
+- Return valid JSON only.
 """
 
     endpoint = ollama_url.rstrip("/") + "/api/generate"
@@ -325,14 +410,26 @@ Return valid JSON only.
     data = parse_qwen_json(raw_response)
 
     headline = clean_headline(data.get("headline", ""))
-    summary = safety_limit_summary(data.get("summary", ""))
-    summary_hindi = safety_limit_summary(data.get("summary_hindi", ""))
+    summary = enforce_english_story(data.get("summary", ""))
+    summary = safety_limit_summary(summary)
+    summary_hindi = safety_limit_summary(
+        preserve_source_names_in_hindi(
+            data.get("summary_hindi", ""),
+            description,
+        )
+    )
+
+    # If Qwen accidentally returns a Hindi headline, do not use it.
+    if headline and re.search(r"[\u0900-\u097F]", headline):
+        headline = ""
 
     if not headline:
         headline = clean_headline(title)
 
     if not summary:
-        raise ValueError("Qwen returned an empty English summary.")
+        raise ValueError(
+            "Qwen returned a non-English/empty English summary."
+        )
 
     if not summary_hindi:
         raise ValueError("Qwen returned an empty Hindi summary.")
