@@ -34,6 +34,8 @@ DEFAULT_CONFIG = "config.yaml"
 DEFAULT_WIDTH = 1080
 DEFAULT_RATIO = "9:16"
 
+_IMAGE_CACHE = {}
+
 MAC_HINDI_FONT = "/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc"
 MAC_HINDI_FONT_BOLD = MAC_HINDI_FONT
 
@@ -216,8 +218,14 @@ def wrapped_height(draw, text, font, max_width, spacing=10):
 
 
 def download(url):
+    """Download and decode a slide image, with per-run URL caching."""
+    url = str(url or "").strip()
     if not url:
         return None
+
+    if url in _IMAGE_CACHE:
+        cached = _IMAGE_CACHE[url]
+        return cached.copy() if cached is not None else None
 
     try:
         response = requests.get(
@@ -225,13 +233,17 @@ def download(url):
             timeout=30,
             headers={
                 "User-Agent":
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X) "
-                    "AppleWebKit/537.36 BollywoodKoko/1.0"
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/153.0 Safari/537.36 BollywoodKoko/1.0"
             },
         )
         response.raise_for_status()
-        return Image.open(io.BytesIO(response.content)).convert("RGB")
+        image = Image.open(io.BytesIO(response.content)).convert("RGB")
+        _IMAGE_CACHE[url] = image
+        return image.copy()
     except Exception as exc:
+        _IMAGE_CACHE[url] = None
         print(f"    [WARN] Image download failed: {exc}")
         return None
 
@@ -501,31 +513,31 @@ def render_standard(draw, s, design, fonts, width, height, scale):
     y, _, _ = draw_wrapped(
         draw, headline, x, y,
         fonts["headline"], maxw, "white",
-        int(18 * scale),
+        int(15 * scale),
         max_lines=4,
     )
 
-    y += int(24 * scale)
+    y += int(22 * scale)
 
     y, _, _ = draw_wrapped(
         draw, story_en, x, y,
         fonts["story"], maxw, (245, 245, 245, 255),
-        int(16 * scale),
+        int(13 * scale),
         max_lines=6,
     )
 
     if story_hi:
-        y += int(22 * scale)
+        y += int(20 * scale)
 
         y = draw_section_label(
             draw, "हिंदी", x, y, fonts["hindi_label"], scale
         )
-        y += int(12 * scale)
+        y += int(10 * scale)
 
         draw_wrapped(
             draw, story_hi, x, y,
             fonts["hindi"], maxw, (245, 245, 245, 255),
-            int(16 * scale),
+            int(13 * scale),
             max_lines=7,
         )
 
@@ -620,14 +632,26 @@ def render_hero_title(draw, s, design, fonts, width, height, scale):
         fonts["hero_headline"],
         maxw,
         "white",
-        int(14 * scale),
+        int(10 * scale),
         max_lines=4,
     )
 
     # Compact bilingual editorial card.
-    y += int(24 * scale)
+    y += int(22 * scale)
     card_top = y
     card_bottom = int(height * 0.91)
+
+    rounded_panel(
+        draw,
+        (
+            margin - int(12 * scale),
+            card_top,
+            width - margin + int(12 * scale),
+            card_bottom,
+        ),
+        int(24 * scale),
+        (0, 0, 0, 185),
+    )
 
     x = margin
     y = card_top + int(20 * scale)
@@ -636,23 +660,23 @@ def render_hero_title(draw, s, design, fonts, width, height, scale):
         draw, story_en, x, y,
         fonts["story_small"], maxw,
         (245, 245, 245, 255),
-        int(18 * scale),
+        int(15 * scale),
         max_lines=4,
     )
 
     if story_hi:
-        y += int(15 * scale)
+        y += int(13 * scale)
         y = draw_section_label(
             draw, "हिंदी", x, y,
             fonts["hindi_label"], scale
         )
-        y += int(9 * scale)
+        y += int(7 * scale)
 
         draw_wrapped(
             draw, story_hi, x, y,
             fonts["hindi_small"], maxw,
             (245, 245, 245, 255),
-            int(18 * scale),
+            int(15 * scale),
             max_lines=5,
         )
 
@@ -719,6 +743,18 @@ def render_announcement(draw, s, design, fonts, width, height, scale):
         y += int(84 * scale)
 
     card_top = y + int(12 * scale)
+
+    rounded_panel(
+        draw,
+        (
+            margin,
+            card_top,
+            width - margin,
+            int(height * 0.91),
+        ),
+        int(22 * scale),
+        (0, 0, 0, 185),
+    )
 
     x = margin + int(20 * scale)
     inner_w = maxw - int(40 * scale)
@@ -801,6 +837,18 @@ def render_release_or_stat(draw, s, design, fonts, width, height, scale):
 
     y += int(18 * scale)
 
+    rounded_panel(
+        draw,
+        (
+            margin,
+            y,
+            width - margin,
+            int(height * 0.91),
+        ),
+        int(22 * scale),
+        (0, 0, 0, 190),
+    )
+
     x = margin + int(20 * scale)
     inner_w = maxw - int(40 * scale)
     y += int(18 * scale)
@@ -850,23 +898,23 @@ def render(data, output, width, height):
     scale = width / 1080.0
     margin = int(58 * scale)
 
-    # Reduce oversized English text for mobile readability while keeping
-    # the bilingual design intact.
+    # Use a slightly smaller font for bilingual content to guarantee
+    # comfortable fit on a 1080x1920 canvas.
     fonts = {
         "cat": make_font(int(27 * scale), bold=True),
         "slide": make_font(int(23 * scale)),
         "footer": make_font(int(21 * scale)),
         "headline": make_font(int(55 * scale), bold=True),
-        "headline_medium": make_font(int(50 * scale), bold=True),
-        "headline_large": make_font(int(45 * scale), bold=True),
-        "hero_headline": make_font(int(50 * scale), bold=True),
-        "hero_stat": make_font(int(46 * scale), bold=True),
-        "story": make_font(int(50 * scale)),
-        "story_small": make_font(int(35 * scale)),
-        "hindi_label": make_font(int(50 * scale), hindi=True, bold=True),
-        "hindi": make_font(int(50 * scale), hindi=True),
+        "headline_medium": make_font(int(37 * scale), bold=True),
+        "headline_large": make_font(int(54 * scale), bold=True),
+        "hero_headline": make_font(int(57 * scale), bold=True),
+        "hero_stat": make_font(int(68 * scale), bold=True),
+        "story": make_font(int(28 * scale)),
+        "story_small": make_font(int(36 * scale)),
+        "hindi_label": make_font(int(22 * scale), hindi=True, bold=True),
+        "hindi": make_font(int(27 * scale), hindi=True),
         "hindi_small": make_font(int(35 * scale), hindi=True),
-        "label": make_font(int(18 * scale), bold=True),
+        "label": make_font(int(21 * scale), bold=True),
     }
 
     image_position = design["image_position"]
@@ -883,7 +931,14 @@ def render(data, output, width, height):
     else:
         image_position = "center"
 
-    image = download(s.get("image_url", ""))
+    image_url = str(s.get("image_url") or "").strip()
+    image = download(image_url)
+
+    if image_url and image is None:
+        print("    [WARN] Image URL exists but could not be rendered; using fallback background")
+    elif not image_url:
+        print("    [INFO] No image_url in slide JSON; using fallback background")
+
     canvas = cover(
         image,
         width,

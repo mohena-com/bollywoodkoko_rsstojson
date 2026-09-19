@@ -2,18 +2,31 @@
 
 set -e
 
-# Project root
-BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-# Current output and archive directories
-OP_JSON="$BASE_DIR/OP_JSON"
+# Default category.
+# Can be overridden from the command line:
+#   ./run.sh news
+CATEGORY="${1:-news}"
+
+# Fixed OP_JSON location used for archiving
+OP_JSON="/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/bollywood/OP_JSON"
+
+# Project directory containing this script
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Archive location
+BASE_DIR="/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/bollywood"
 ARCHIVE_DIR="$BASE_DIR/archive/$(date +%m-%d-%Y)"
 
 echo "=========================================="
 echo " BollywoodKoko Pipeline"
 echo "=========================================="
-echo "Base directory : $BASE_DIR"
-echo "Output folder  : $OP_JSON"
+echo "Category       : $CATEGORY"
+echo "Project folder : $PROJECT_DIR"
+echo "OP_JSON        : $OP_JSON"
 echo "Archive folder : $ARCHIVE_DIR"
 echo ""
 
@@ -27,8 +40,6 @@ if [ -d "$OP_JSON" ]; then
 
     mkdir -p "$ARCHIVE_DIR"
 
-    # If today's archive already contains OP_JSON,
-    # remove it so the archive represents the latest run.
     if [ -d "$ARCHIVE_DIR/OP_JSON" ]; then
         echo "      Removing existing today's archive..."
         rm -rf "$ARCHIVE_DIR/OP_JSON"
@@ -51,86 +62,41 @@ fi
 
 echo ""
 echo "[2/5] Running RSS extractor..."
-python bh_rss_extractor.py
+python "$PROJECT_DIR/bh_rss_extractor.py"
 
 # --------------------------------------------------
 # 3. Convert articles using Qwen
+#    Process ONLY selected category
 # --------------------------------------------------
 
 echo ""
-echo "[3/5] Running Qwen converter..."
-python qwen_converter.py
+echo "[3/5] Running Qwen converter for category: $CATEGORY..."
+python "$PROJECT_DIR/qwen_converter.py" --category "$CATEGORY"
 
 # --------------------------------------------------
-# 4. Generate slide designs and paint slides
+# 4. Generate design and paint slides
+#    Process ONLY selected category
 # --------------------------------------------------
 
 echo ""
 echo "[4/5] Generating slide designs..."
-python qwen_slide_designer.py
+python "$PROJECT_DIR/qwen_slide_designer.py" --category "$CATEGORY"
 
 echo ""
 echo "      Painting slides..."
-python paint_slides.py
+python "$PROJECT_DIR/paint_slides.py" --category "$CATEGORY"
 
 # --------------------------------------------------
 # 5. Create reels
+#    Process ONLY selected category
 # --------------------------------------------------
 
 echo ""
-echo "[5/5] Creating reels..."
-# python create_reel.py
+echo "[5/5] Creating reels for category: $CATEGORY..."
+python "$PROJECT_DIR/create_reel_with_list_categories.py" --category "$CATEGORY"
 
-echo "[a/g] Generating News Reels..."
-python create_reel_with_list_categories.py --category news
-# --------------------------------------------------
-# 5.a News Reels Created
-# --------------------------------------------------
-
-echo "[b/g] Generating Features Reels..."
-python create_reel_with_list_categories.py --category features
-# --------------------------------------------------
-# 5.b Features
-# --------------------------------------------------
-
-echo "[c/g] Generating Movie Release Dates Reels..."
-python create_reel_with_list_categories.py --category movie_release_dates
-# --------------------------------------------------
-# 5.c Movie Release Dates Reels Created
-# --------------------------------------------------
-
-echo "[d/g] Generating Movie Reviews Reels..."
-python create_reel_with_list_categories.py --category movie_reviews
-# --------------------------------------------------
-# 5.d Movie Reviews Reels Created
-# --------------------------------------------------
-
-echo "[e/g] Generating Previews Reels..."
-python create_reel_with_list_categories.py --category movie_previews
-# --------------------------------------------------
-# 5.e Movie Previews Reels Created
-# --------------------------------------------------
-
-echo "[f/g] Generating Music Reviews Reels..."
-python create_reel_with_list_categories.py --category music_reviews
-# --------------------------------------------------
-# 5.f Music Reviews Reels Created
-# --------------------------------------------------
-
-echo "[f/g] Generating Special Analysis Reels..."
-python create_reel_with_list_categories.py --category special_analysis
-# --------------------------------------------------
-# 5.g Special Analysis Reels Created
-# --------------------------------------------------
 echo ""
 echo "=========================================="
 echo " Pipeline completed successfully"
+echo " Category: $CATEGORY"
 echo "=========================================="
-
- news
-  
-  
-  
-  
-  
-  

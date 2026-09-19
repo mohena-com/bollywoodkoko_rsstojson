@@ -26,6 +26,7 @@ from pathlib import Path
 
 import requests
 import yaml
+from bs4 import BeautifulSoup
 
 
 DEFAULT_CONFIG = "config.yaml"
@@ -35,6 +36,10 @@ HEADLINE_MAX_CHARS = 110
 
 # This is ONLY a safety limit. Normal Qwen summaries are NOT truncated.
 SUMMARY_SAFETY_MAX_CHARS = 1200
+
+# Image discovery is only used when the RSS/source JSON does not already
+# provide an image URL. This keeps the existing image path untouched.
+IMAGE_DISCOVERY_TIMEOUT = 20
 
 
 DEFAULT_QWEN_CONFIG = {
@@ -219,6 +224,30 @@ def get_qwen_config(config):
     return result
 
 
+def load_prompt_template():
+    """
+    Load the Qwen prompt from qwen_converter.properties.
+
+    The properties file is expected to sit next to qwen_converter.py.
+    It contains the prompt template with {title} and {description}
+    placeholders.
+    """
+    prompt_path = Path(__file__).resolve().with_name("qwen_converter.properties")
+
+    if not prompt_path.exists():
+        raise FileNotFoundError(
+            f"Prompt properties file not found: {prompt_path}"
+        )
+
+    prompt = prompt_path.read_text(encoding="utf-8").strip()
+
+    if not prompt:
+        raise ValueError(f"Prompt properties file is empty: {prompt_path}")
+
+    return prompt
+
+PROMPT_TEMPLATE = load_prompt_template()
+
 def check_ollama(ollama_url, timeout=10):
     """Check whether Ollama is reachable."""
     url = ollama_url.rstrip("/") + "/api/tags"
@@ -322,324 +351,14 @@ def qwen_summarize(
     title = clean_text(title)
     description = clean_text(description)
 
-    prompt = f"""
-You are a professional Bollywood entertainment news editor.
+    prompt_template = PROMPT_TEMPLATE
 
-Your job is to transform the SOURCE ARTICLE below into content suitable
-for an Instagram news carousel.
+    prompt = prompt_template.format(
+        title=title,
+        description=description,
+    )
 
-You MUST use ONLY information contained in the SOURCE TITLE and SOURCE ARTICLE.
-Do not use outside knowledge. Do not guess. Do not add facts.
-
-========================
-SOURCE TITLE
-========================
-{title}
-
-========================
-SOURCE ARTICLE
-========================
-{description}
-
-========================
-OUTPUT
-========================
-
-Return ONLY one valid JSON object with exactly these three keys:
-
-{{
-  "headline": "English headline",
-  "summary": "English summary",
-  "summary_hindi": "Hindi summary"
-}}
-
-Do not return Markdown.
-Do not return ```json.
-Do not return explanations.
-Do not return analysis.
-Do not return <think> tags.
-Return JSON only.
-
-==================================================
-1. HEADLINE — ENGLISH ONLY
-==================================================
-
-Write a strong, natural news headline based on the SOURCE TITLE and ARTICLE.
-
-Requirements:
-- MUST be entirely in English.
-- Maximum approximately 100 characters.
-- Clearly identify the main person, movie, series, event or development.
-- Preserve the official spelling of names and titles.
-- Prefer the actual news development over unnecessary background.
-- Make it engaging but factual.
-- No clickbait.
-- No exaggerated language.
-- No emojis.
-- No hashtags.
-- Do not invent information.
-
-VERY IMPORTANT:
-Never translate or transliterate proper names or entertainment titles.
-
-For example:
-"Matka King" must remain "Matka King"
-"Prime Video" must remain "Prime Video"
-"Brij Bhatti" must remain "Brij Bhatti"
-"Ek Aur Baazi" must remain "Ek Aur Baazi"
-
-WRONG:
-"Vijay Varma के मातक राज सीजन 2..."
-
-CORRECT:
-"Vijay Varma Confirms Matka King Season 2"
-
-The headline MUST contain English words only.
-
-==================================================
-2. SUMMARY — ENGLISH ONLY
-==================================================
-
-Write a concise editorial news summary.
-
-Requirements:
-- MUST be entirely in English.
-- Approximately 60-90 words.
-- Prefer exactly 3 sentences.
-- Start with the main news development.
-- Include the most important supporting details.
-- Mention relevant people, movie/series names, roles, episode names,
-  platforms, dates or production details when they are important.
-- Preserve the meaning and facts of the SOURCE ARTICLE.
-- Rewrite the article; do not simply copy sentences from it.
-- Do not turn the article into a vague generic summary.
-- Do not omit the central news.
-- Do not repeat the headline unnecessarily.
-- Do not end with "..."
-- Do not truncate the summary.
-- Do not use bullet points.
-- Do not use emojis.
-- Do not use hashtags.
-- Do not add opinions.
-- Do not add speculation.
-- Do not add information from your own knowledge.
-
-LANGUAGE CHECK:
-The "summary" field must contain NO Devanagari/Hindi characters.
-
-If you are unsure how to express something in English,
-use the original English wording from the SOURCE ARTICLE.
-
-==================================================
-3. SUMMARY_HINDI — HINDI WITH ENGLISH PROPER NAMES
-==================================================
-
-Write a natural Hindi version of the SAME summary.
-
-Requirements:
-- Approximately 60-90 words.
-- Prefer exactly 3 sentences.
-- Hindi grammar and normal Hindi vocabulary should be written in Devanagari.
-- Preserve the facts and meaning of the English summary.
-- Do not add any new information.
-- Do not remove important facts.
-
-CRITICAL PROPER-NOUN RULE:
-
-DO NOT translate, transliterate or Hindi-ize any official name or title.
-
-The following categories MUST remain in their original English form
-when they appear in the source:
-
-1. Movie names
-2. Series/web-series names
-3. Show names
-4. Song names
-5. Episode names
-6. Character names
-7. Actor/actress names
-8. Director/writer/producer names
-9. Streaming platform names
-10. Company/brand names
-11. Organization names
-12. Place names when they are official names
-13. Any other recognizable proper noun
-
-Examples:
-
-Matka King → Matka King
-Prime Video → Prime Video
-Brij Bhatti → Brij Bhatti
-Ek Aur Baazi → Ek Aur Baazi
-Vijay Varma → Vijay Varma
-
-NEVER produce:
-
-मटका किंग
-मटका राज
-मातक राज
-प्राइम वीडियो
-बृज भट्टी
-विजय वर्मा
-
-Instead write:
-
-Matka King
-Prime Video
-Brij Bhatti
-Vijay Varma
-
-Example of the desired style:
-
-"विजय वर्मा ने पुष्टि की है कि Matka King का दूसरा सीज़न लौट रहा है।
-उन्होंने Season 2 की स्क्रिप्ट की तस्वीर साझा की, जिसका पहला एपिसोड
-“Ek Aur Baazi” है, और वह Brij Bhatti की भूमिका में वापसी करेंगे।
-नए सीज़न की कहानी से जुड़ी जानकारी अभी सामने नहीं आई है।"
-
-Notice:
-- Hindi sentence structure = Devanagari
-- Official names/titles = English
-- No Roman Hindi
-- No translated movie/series names
-
-==================================================
-4. FACTUALITY RULES
-==================================================
-
-The SOURCE ARTICLE is the single source of truth.
-
-You MUST:
-- Preserve factual accuracy.
-- Preserve the relationship between people, projects and events.
-- Preserve the distinction between confirmed information and speculation.
-- Use "confirmed", "announced", "reportedly", "suggests", etc. only when
-  supported by the source.
-- If the source says something has NOT been revealed, do not present it
-  as known.
-- If the source describes something as speculation, do not rewrite it
-  as a confirmed fact.
-
-You MUST NOT:
-- Invent quotes.
-- Invent release dates.
-- Invent cast members.
-- Invent plot details.
-- Invent production details.
-- Infer facts from your general knowledge.
-- Add promotional language that changes the meaning.
-- Combine unrelated facts.
-
-==================================================
-5. EDITORIAL PRIORITY
-==================================================
-
-When deciding what to include, prioritize information in this order:
-
-1. The main news/development
-2. The person or project directly involved
-3. The important confirmation/announcement
-4. Key supporting detail
-5. Important role, episode, platform or production information
-6. Relevant background only if needed for context
-
-Do NOT try to summarize every paragraph of the SOURCE ARTICLE.
-
-The goal is NOT to compress the entire article.
-
-The goal is to identify the MAIN NEWS and explain it clearly in
-approximately 60-90 words.
-
-==================================================
-6. FINAL VALIDATION BEFORE OUTPUT
-==================================================
-
-Before returning the JSON, silently check:
-
-HEADLINE:
-- English only?
-- No Hindi/Devanagari?
-- Official names preserved?
-- Factual?
-- Around 100 characters or less?
-
-SUMMARY:
-- English only?
-- 60-90 words approximately?
-- Main news clearly stated?
-- Approximately 3 sentences?
-- No invented information?
-- No truncation?
-- No "..."?
-
-SUMMARY_HINDI:
-- Hindi written in Devanagari?
-- English proper names/titles preserved?
-- Same facts as English summary?
-- No translated movie/series/person names?
-- No Roman Hindi?
-- No invented information?
-
-If any rule is violated, correct it BEFORE returning the JSON.
-
-RETURN ONLY THE JSON OBJECT.
-"""
-    prompt1 = f"""
-You are an editorial assistant preparing Bollywood entertainment news
-for an Instagram carousel.
-
-SOURCE TITLE:
-{title}
-
-SOURCE ARTICLE:
-{description}
-
-TASK:
-Create an accurate, concise editorial version of this story.
-
-Return ONLY a JSON object with exactly these keys:
-{{
-  "headline": "string",
-  "summary": "string",
-  "summary_hindi": "string"
-}}
-
-RULES FOR headline:
-- Rewrite the source title into a clear, engaging news headline.
-- Keep the key person/movie/show/event.
-- Do not use clickbait.
-- Maximum about 100 characters.
-
-RULES FOR summary:
-- Write approximately 60-90 words.
-- Use exactly 3 concise sentences where possible.
-- Capture the main development and the most important supporting details.
-- Preserve names, titles, dates, roles and other facts present in the source.
-- Do NOT simply copy the article.
-- Do NOT end with "..." or truncate the story.
-- Do NOT invent facts.
-- Do NOT add opinions or speculation not supported by the source.
-
-RULES FOR summary_hindi:
-- Translate/adapt the SAME facts into natural Hindi written in Devanagari.
-- Approximately 60-90 words.
-- Use exactly 3 concise sentences where possible.
-- Hindi grammar and connecting words should be in Devanagari.
-- Do NOT use Roman Hindi for ordinary Hindi words.
-- NEVER translate, transliterate, or replace English movie, series, show, song, character, platform, company, person, or episode names.
-- Preserve proper names and entertainment titles EXACTLY as they appear in the source whenever possible.
-- Examples: "Matka King" MUST remain "Matka King", "Prime Video" MUST remain "Prime Video", "Brij Bhatti" MUST remain "Brij Bhatti", and "Ek Aur Baazi" MUST remain "Ek Aur Baazi".
-- Do NOT turn "Matka King" into "मटका किंग", "मटका राजा", or any other Hindi version.
-- If you are unsure whether a phrase is a title/name, preserve the original English phrase from the source.
-- Do NOT invent facts or add information.
-
-IMPORTANT:
-- The "summary" field MUST ALWAYS be in English only.
-- The "summary_hindi" field MUST be Hindi, but English names/titles/proper nouns from the source must remain in English.
-- The "headline" field MUST also be in English only. Do not write a Hindi headline.
-- The output must be complete and self-contained.
-- Do not truncate the summary merely to meet a character limit.
-- Return valid JSON only.
-"""
+    
 
     endpoint = ollama_url.rstrip("/") + "/api/generate"
 
@@ -702,10 +421,138 @@ IMPORTANT:
     }
 
 
+def _first_non_empty(*values):
+    """Return the first non-empty value as a string."""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def extract_image_url_from_story(story):
+    """
+    Extract an image URL from common RSS/source-JSON structures.
+
+    Supported forms include:
+      image_url, image, thumbnail
+      media_content[].url
+      media_thumbnail[].url
+      enclosures[].href/url
+    """
+    direct = _first_non_empty(
+        story.get("image_url"),
+        story.get("image"),
+        story.get("thumbnail"),
+    )
+    if direct:
+        return direct
+
+    for key in ("media_content", "media_thumbnail", "enclosures"):
+        items = story.get(key) or []
+        if isinstance(items, dict):
+            items = [items]
+        if not isinstance(items, list):
+            continue
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            url = _first_non_empty(
+                item.get("url"),
+                item.get("href"),
+                item.get("src"),
+            )
+            if url:
+                return url
+
+    return ""
+
+
+def extract_image_from_article_url(source_url):
+    """
+    Fallback image discovery from the article page when RSS contains no
+    image URL. Prefer Open Graph/Twitter metadata, then JSON-LD image.
+    """
+    if not source_url:
+        return ""
+
+    try:
+        response = requests.get(
+            source_url,
+            timeout=IMAGE_DISCOVERY_TIMEOUT,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/153.0 Safari/537.36 BollywoodKoko/1.0"
+                )
+            },
+        )
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # 1. Open Graph
+        for selector in [
+            ("meta", {"property": "og:image"}),
+            ("meta", {"name": "og:image"}),
+            ("meta", {"property": "og:image:url"}),
+            ("meta", {"name": "twitter:image"}),
+            ("meta", {"property": "twitter:image"}),
+        ]:
+            tag = soup.find(*selector)
+            if tag and tag.get("content"):
+                return tag["content"].strip()
+
+        # 2. link rel=image_src
+        tag = soup.find("link", rel=lambda value: value and "image_src" in value)
+        if tag and tag.get("href"):
+            return tag["href"].strip()
+
+        # 3. JSON-LD
+        for script in soup.find_all("script", type="application/ld+json"):
+            raw = script.string or script.get_text(strip=True)
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+
+            candidates = payload if isinstance(payload, list) else [payload]
+            for obj in candidates:
+                if not isinstance(obj, dict):
+                    continue
+                image = obj.get("image")
+                if isinstance(image, str) and image.strip():
+                    return image.strip()
+                if isinstance(image, dict):
+                    url = image.get("url") or image.get("contentUrl")
+                    if url:
+                        return str(url).strip()
+                if isinstance(image, list):
+                    for item in image:
+                        if isinstance(item, str) and item.strip():
+                            return item.strip()
+                        if isinstance(item, dict):
+                            url = item.get("url") or item.get("contentUrl")
+                            if url:
+                                return str(url).strip()
+
+    except Exception as exc:
+        print(f"    [WARN] Article image discovery failed: {exc}")
+
+    return ""
+
 def extract_story_fields(story):
     """
     Handle the expected Bollywood Hungama story structure while allowing
-    small variations in field names.
+    small variations in field names. If RSS does not contain an image,
+    fall back to the article URL and discover og:image/twitter:image/JSON-LD.
     """
     title = (
         story.get("title")
@@ -721,6 +568,23 @@ def extract_story_fields(story):
         or ""
     )
 
+    source_url = (
+        story.get("source_url")
+        or story.get("link")
+        or story.get("url")
+        or ""
+    )
+
+    image_url = extract_image_url_from_story(story)
+
+    if not image_url and source_url:
+        print("    → No RSS image; discovering image from article page")
+        image_url = extract_image_from_article_url(source_url)
+        if image_url:
+            print(f"    ✓ Image found: {image_url}")
+        else:
+            print("    ⚠ No article image found")
+
     return {
         "title": clean_text(title),
         "description": clean_text(description),
@@ -728,14 +592,8 @@ def extract_story_fields(story):
         or story.get("pubDate")
         or story.get("published")
         or "",
-        "image_url": story.get("image_url")
-        or story.get("image")
-        or story.get("thumbnail")
-        or "",
-        "source_url": story.get("source_url")
-        or story.get("link")
-        or story.get("url")
-        or "",
+        "image_url": image_url,
+        "source_url": source_url,
     }
 
 
