@@ -79,11 +79,58 @@ python paint_slides.py
 
 echo ""
 echo "[5/5] Creating reels..."
-python create_reel.py
+# python create_reel.py
 
+echo "[a/g] Generating News Reels..."
+python create_reel_with_list_categories.py --category news
+# --------------------------------------------------
+# 5.a News Reels Created
+# --------------------------------------------------
+
+echo "[b/g] Generating Features Reels..."
+python create_reel_with_list_categories.py --category features
+# --------------------------------------------------
+# 5.b Features
+# --------------------------------------------------
+
+echo "[c/g] Generating Movie Release Dates Reels..."
+python create_reel_with_list_categories.py --category movie_release_dates
+# --------------------------------------------------
+# 5.c Movie Release Dates Reels Created
+# --------------------------------------------------
+
+echo "[d/g] Generating Movie Reviews Reels..."
+python create_reel_with_list_categories.py --category movie_reviews
+# --------------------------------------------------
+# 5.d Movie Reviews Reels Created
+# --------------------------------------------------
+
+echo "[e/g] Generating Previews Reels..."
+python create_reel_with_list_categories.py --category movie_previews
+# --------------------------------------------------
+# 5.e Movie Previews Reels Created
+# --------------------------------------------------
+
+echo "[f/g] Generating Music Reviews Reels..."
+python create_reel_with_list_categories.py --category music_reviews
+# --------------------------------------------------
+# 5.f Music Reviews Reels Created
+# --------------------------------------------------
+
+echo "[f/g] Generating Special Analysis Reels..."
+python create_reel_with_list_categories.py --category special_analysis
+# --------------------------------------------------
+# 5.g Special Analysis Reels Created
+# --------------------------------------------------
 echo ""
 echo "=========================================="
 echo " Pipeline completed successfully"
 echo "=========================================="
 
- 
+ news
+  
+  
+  
+  
+  
+  
