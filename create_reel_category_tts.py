@@ -156,7 +156,7 @@ def run_ffmpeg(image, music, voice, output, duration):
                 # Music is the background signal and the Hindi voice is the
                 # sidechain. When the voice is present, FFmpeg compresses
                 # the music heavily. The voice itself is kept bold/full.
-                "[1:a]volume=0.45[music];"
+                "[1:a]volume=0.30[music];"
                 "[2:a]volume=1.5,asplit=2[voice_sc][voice_mix];"
                 "[music][voice_sc]sidechaincompress="
                 "threshold=0.03:"
