@@ -157,7 +157,7 @@ def run_ffmpeg(image, music, voice, output, duration):
                 # sidechain. When the voice is present, FFmpeg compresses
                 # the music heavily. The voice itself is kept bold/full.
                 "[1:a]volume=0.05[music];"
-                "[2:a]volume=2.5,asplit=2[voice_sc][voice_mix];"
+                "[2:a]volume=1.5,asplit=2[voice_sc][voice_mix];"
                 "[music][voice_sc]sidechaincompress="
                 "threshold=0.03:"
                 "ratio=20:"
