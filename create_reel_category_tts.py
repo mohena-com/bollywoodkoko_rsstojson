@@ -146,41 +146,35 @@ def run_ffmpeg(image, music, voice, output, duration):
     if voice:
         # Rebuild with an audio filter graph so voice is foreground and music is lower.
         cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", str(image),
-            "-stream_loop", "-1", "-i", str(music),
-            "-i", str(voice),
-            "-t", f"{duration:.2f}",
-            "-filter_complex",
-            (
-                # Music is the background signal and the Hindi voice is the
-                # sidechain. When the voice is present, FFmpeg compresses
-                # the music heavily. The voice itself is kept bold/full.
-                "[1:a]volume=0.15[music];"
-                "[2:a]volume=1.5,asplit=2[voice_sc][voice_mix];"
-                "[music][voice_sc]sidechaincompress="
-                "threshold=0.03:"
-                "ratio=20:"
-                "attack=20:"
-                "release=700:"
-                "makeup=1:"
-                "mix=1[ducked_music];"
-                "[ducked_music][voice_mix]amix=inputs=2:"
-                "duration=longest:"
-                "dropout_transition=0:"
-                "normalize=0[aout]"
-            ),
-            "-map", "0:v:0",
-            "-map", "[aout]",
-            "-c:v", "libx264",
-            "-tune", "stillimage",
-            "-pix_fmt", "yuv420p",
-            "-r", "30",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-shortest",
-            "-movflags", "+faststart",
-            str(output),
+            "[1:a]volume=0.22[music];"
+
+            "[2:a]"
+            "volume=1.8,"
+            "acompressor="
+            "threshold=0.12:"
+            "ratio=3:"
+            "attack=5:"
+            "release=80:"
+            "makeup=2,"
+            "asplit=2[voice_sc][voice_mix];"
+
+            "[music][voice_sc]"
+            "sidechaincompress="
+            "threshold=0.02:"
+            "ratio=25:"
+            "attack=10:"
+            "release=500:"
+            "makeup=1:"
+            "mix=1"
+            "[ducked_music];"
+
+            "[ducked_music][voice_mix]"
+            "amix=inputs=2:"
+            "duration=longest:"
+            "dropout_transition=0:"
+            "normalize=0,"
+            "loudnorm=I=-14:TP=-1.5:LRA=7"
+            "[aout]"
         ]
 
     subprocess.run(cmd, check=True)
