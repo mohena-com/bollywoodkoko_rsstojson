@@ -266,7 +266,7 @@ def save_json(data, output_file):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Extract today's Bollywood Hungama RSS stories."
+            "Extract Bollywood Hungama RSS stories for a selected date."
         )
     )
 
@@ -279,7 +279,7 @@ def main():
     parser.add_argument(
         "--date",
         default=None,
-        help="Date in YYYY-MM-DD format."
+        help="Target date in YYYY-MM-DD format. Defaults to today in configured timezone."
     )
 
     args = parser.parse_args()
