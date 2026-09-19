@@ -835,6 +835,16 @@ def main():
         help="Skip the initial Ollama connectivity check.",
     )
 
+    parser.add_argument(
+        "--category",
+        default=None,
+        help=(
+            "Process only this category "
+            "(e.g. news, features, movie_reviews). "
+            "If omitted, all categories are processed."
+        ),
+    )
+
     args = parser.parse_args()
 
     try:
@@ -875,9 +885,32 @@ def main():
                 "Expected source JSON structure: categories -> object"
             )
 
+        # Select only the requested category when --category is supplied.
+        if args.category:
+            category_key = args.category.strip()
+
+            if category_key not in categories:
+                available = ", ".join(categories.keys())
+                raise ValueError(
+                    f"Category '{category_key}' not found. "
+                    f"Available categories: {available}"
+                )
+
+            selected_categories = {
+                category_key: categories[category_key]
+            }
+
+            print(f"Category    : {category_key}")
+            print("Mode        : Single category")
+        else:
+            selected_categories = categories
+
+            print("Category    : ALL")
+            print("Mode        : All categories")
+
         manifests = {}
 
-        for category_key, category_data in categories.items():
+        for category_key, category_data in selected_categories.items():
             if not isinstance(category_data, dict):
                 continue
 
@@ -898,6 +931,7 @@ def main():
             manifests[category_key] = manifest
 
         master_manifest = {
+            "category_filter": args.category,
             "source": {
                 "file": str(source_json_path),
                 "name": config.get("source", {}).get(
