@@ -34,18 +34,37 @@ DEFAULT_CONFIG = "config.yaml"
 DEFAULT_WIDTH = 1080
 DEFAULT_RATIO = "9:16"
 
-_IMAGE_CACHE = {}
-
 MAC_HINDI_FONT = "/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc"
 MAC_HINDI_FONT_BOLD = MAC_HINDI_FONT
 
+# Prefer clean Noto Sans fonts for mobile readability when installed.
+# Fall back to the existing macOS fonts so the renderer remains portable.
+NOTO_HINDI_CANDIDATES = {
+    False: [
+        "/System/Library/Fonts/Supplemental/NotoSansDevanagari-Regular.ttf",
+        "/Library/Fonts/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+    ],
+    True: [
+        "/System/Library/Fonts/Supplemental/NotoSansDevanagari-Bold.ttf",
+        "/Library/Fonts/NotoSansDevanagari-Bold.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+    ],
+}
+
 ENGLISH_CANDIDATES = {
     False: [
+        "/System/Library/Fonts/Supplemental/NotoSans-Regular.ttf",
+        "/Library/Fonts/NotoSans-Regular.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Supplemental/Helvetica.ttf",
         "/System/Library/Fonts/SFNS.ttf",
     ],
     True: [
+        "/System/Library/Fonts/Supplemental/NotoSans-Bold.ttf",
+        "/Library/Fonts/NotoSans-Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Helvetica Bold.ttf",
         "/System/Library/Fonts/SFNS.ttf",
@@ -70,27 +89,18 @@ SUPPORTED_LAYOUTS = {
 
 def font_path(hindi=False, bold=False):
     if hindi:
-        if Path(MAC_HINDI_FONT).exists():
-            return MAC_HINDI_FONT
-
-        # Linux fallback if the renderer is later used in Docker/CI.
-        fallback = [
-            "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-        ]
-        if bold:
-            fallback = [
-                "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-            ]
-
-        for p in fallback:
+        # Prefer Noto Sans Devanagari for clearer mobile rendering.
+        for p in NOTO_HINDI_CANDIDATES[bool(bold)]:
             if Path(p).exists():
                 return p
 
+        # Existing macOS fallback.
+        if Path(MAC_HINDI_FONT).exists():
+            return MAC_HINDI_FONT
+
         raise FileNotFoundError(
-            "No Devanagari font found. Expected macOS "
-            f"font: {MAC_HINDI_FONT}"
+            "No Devanagari font found. Expected Noto Sans Devanagari "
+            f"or macOS font: {MAC_HINDI_FONT}"
         )
 
     candidates = ENGLISH_CANDIDATES[bool(bold)]
@@ -218,14 +228,8 @@ def wrapped_height(draw, text, font, max_width, spacing=10):
 
 
 def download(url):
-    """Download and decode a slide image, with per-run URL caching."""
-    url = str(url or "").strip()
     if not url:
         return None
-
-    if url in _IMAGE_CACHE:
-        cached = _IMAGE_CACHE[url]
-        return cached.copy() if cached is not None else None
 
     try:
         response = requests.get(
@@ -233,17 +237,13 @@ def download(url):
             timeout=30,
             headers={
                 "User-Agent":
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/153.0 Safari/537.36 BollywoodKoko/1.0"
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X) "
+                    "AppleWebKit/537.36 BollywoodKoko/1.0"
             },
         )
         response.raise_for_status()
-        image = Image.open(io.BytesIO(response.content)).convert("RGB")
-        _IMAGE_CACHE[url] = image
-        return image.copy()
+        return Image.open(io.BytesIO(response.content)).convert("RGB")
     except Exception as exc:
-        _IMAGE_CACHE[url] = None
         print(f"    [WARN] Image download failed: {exc}")
         return None
 
@@ -522,7 +522,7 @@ def render_standard(draw, s, design, fonts, width, height, scale):
     y, _, _ = draw_wrapped(
         draw, story_en, x, y,
         fonts["story"], maxw, (245, 245, 245, 255),
-        int(13 * scale),
+        int(18 * scale),
         max_lines=6,
     )
 
@@ -537,7 +537,7 @@ def render_standard(draw, s, design, fonts, width, height, scale):
         draw_wrapped(
             draw, story_hi, x, y,
             fonts["hindi"], maxw, (245, 245, 245, 255),
-            int(13 * scale),
+            int(18 * scale),
             max_lines=7,
         )
 
@@ -582,7 +582,7 @@ def render_split(draw, s, design, fonts, width, height, scale):
         draw, story_en, x, y,
         fonts["story_small"], inner_w,
         (245, 245, 245, 255),
-        int(15 * scale),
+        int(18 * scale),
         max_lines=4,
     )
 
@@ -597,7 +597,7 @@ def render_split(draw, s, design, fonts, width, height, scale):
             draw, story_hi, x, y,
             fonts["hindi_small"], inner_w,
             (245, 245, 245, 255),
-            int(15 * scale),
+            int(18 * scale),
             max_lines=5,
         )
 
@@ -660,12 +660,12 @@ def render_hero_title(draw, s, design, fonts, width, height, scale):
         draw, story_en, x, y,
         fonts["story_small"], maxw,
         (245, 245, 245, 255),
-        int(15 * scale),
+        int(18 * scale),
         max_lines=4,
     )
 
     if story_hi:
-        y += int(13 * scale)
+        y += int(18 * scale)
         y = draw_section_label(
             draw, "हिंदी", x, y,
             fonts["hindi_label"], scale
@@ -676,7 +676,7 @@ def render_hero_title(draw, s, design, fonts, width, height, scale):
             draw, story_hi, x, y,
             fonts["hindi_small"], maxw,
             (245, 245, 245, 255),
-            int(15 * scale),
+            int(18 * scale),
             max_lines=5,
         )
 
@@ -764,7 +764,7 @@ def render_announcement(draw, s, design, fonts, width, height, scale):
         draw, story_en, x, y,
         fonts["story_small"], inner_w,
         (245, 245, 245, 255),
-        int(15 * scale),
+        int(18 * scale),
         max_lines=4,
     )
 
@@ -780,7 +780,7 @@ def render_announcement(draw, s, design, fonts, width, height, scale):
             draw, story_hi, x, y,
             fonts["hindi_small"], inner_w,
             (245, 245, 245, 255),
-            int(15 * scale),
+            int(18 * scale),
             max_lines=5,
         )
 
@@ -851,13 +851,13 @@ def render_release_or_stat(draw, s, design, fonts, width, height, scale):
 
     x = margin + int(20 * scale)
     inner_w = maxw - int(40 * scale)
-    y += int(18 * scale)
+    y += int(22 * scale)
 
     y, _, _ = draw_wrapped(
         draw, story_en, x, y,
         fonts["story_small"], inner_w,
         (245, 245, 245, 255),
-        int(15 * scale),
+        int(18 * scale),
         max_lines=4,
     )
 
@@ -873,7 +873,7 @@ def render_release_or_stat(draw, s, design, fonts, width, height, scale):
             draw, story_hi, x, y,
             fonts["hindi_small"], inner_w,
             (245, 245, 245, 255),
-            int(15 * scale),
+            int(18 * scale),
             max_lines=5,
         )
 
@@ -909,11 +909,11 @@ def render(data, output, width, height):
         "headline_large": make_font(int(54 * scale), bold=True),
         "hero_headline": make_font(int(57 * scale), bold=True),
         "hero_stat": make_font(int(68 * scale), bold=True),
-        "story": make_font(int(28 * scale)),
-        "story_small": make_font(int(36 * scale)),
+        "story": make_font(int(41 * scale)),
+        "story_small": make_font(int(41 * scale)),
         "hindi_label": make_font(int(22 * scale), hindi=True, bold=True),
-        "hindi": make_font(int(27 * scale), hindi=True),
-        "hindi_small": make_font(int(35 * scale), hindi=True),
+        "hindi": make_font(int(40 * scale), hindi=True),
+        "hindi_small": make_font(int(40 * scale), hindi=True),
         "label": make_font(int(21 * scale), bold=True),
     }
 
@@ -931,14 +931,7 @@ def render(data, output, width, height):
     else:
         image_position = "center"
 
-    image_url = str(s.get("image_url") or "").strip()
-    image = download(image_url)
-
-    if image_url and image is None:
-        print("    [WARN] Image URL exists but could not be rendered; using fallback background")
-    elif not image_url:
-        print("    [INFO] No image_url in slide JSON; using fallback background")
-
+    image = download(s.get("image_url", ""))
     canvas = cover(
         image,
         width,
@@ -1117,7 +1110,8 @@ def main():
     print(f"Output : {output_root}")
     print(f"Canvas : {width}x{height} ({args.ratio})")
     print(f"RAQM   : {RAQM_AVAILABLE}")
-    print(f"Hindi  : {MAC_HINDI_FONT}")
+    print(f"Hindi  : {font_path(hindi=True)}")
+    print(f"English: {font_path(hindi=False)}")
     print("Lang   : English + Hindi (always)")
     print("Design : Qwen creative direction")
 
