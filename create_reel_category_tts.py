@@ -153,10 +153,17 @@ def run_ffmpeg(image, music, voice, output, duration):
             "-t", f"{duration:.2f}",
             "-filter_complex",
             (
-                "[1:a]volume=0.16,afade=t=out:"
-                f"st={max(0.0, duration - 0.7):.2f}:d=0.7[music];"
+                # Background music is automatically ducked to ~10% while
+                # the Hindi voice is speaking, then returns smoothly.
+                "[1:a]volume=1.0[music];"
                 "[2:a]volume=1.0[voice];"
-                "[music][voice]amix=inputs=2:duration=longest:"
+                "[music][voice]sidechaincompress="
+                "threshold=0.03:"
+                "ratio=8:"
+                "attack=50:"
+                "release=700:"
+                "makeup=1[ducked];"
+                "[ducked][voice]amix=inputs=2:duration=longest:"
                 "dropout_transition=0[aout]"
             ),
             "-map", "0:v:0",
