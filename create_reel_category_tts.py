@@ -153,21 +153,22 @@ def run_ffmpeg(image, music, voice, output, duration):
             "-t", f"{duration:.2f}",
             "-filter_complex",
             (
-                # Background music is automatically ducked to ~10% while
-                # the Hindi voice is speaking, then returns smoothly.
-                "[1:a]volume=1.0[music];"
-                # Split the voice because sidechaincompress consumes its
-                # sidechain input. One copy controls ducking and the other
-                # is mixed into the final output.
-                "[2:a]asplit=2[voice_sc][voice_mix];"
+                # Music is the background signal and the Hindi voice is the
+                # sidechain. When the voice is present, FFmpeg compresses
+                # the music heavily. The voice itself is kept bold/full.
+                "[1:a]volume=0.45[music];"
+                "[2:a]volume=1.5,asplit=2[voice_sc][voice_mix];"
                 "[music][voice_sc]sidechaincompress="
                 "threshold=0.03:"
-                "ratio=12:"
-                "attack=50:"
+                "ratio=20:"
+                "attack=20:"
                 "release=700:"
-                "makeup=1[ducked];"
-                "[ducked][voice_mix]amix=inputs=2:duration=longest:"
-                "dropout_transition=0[aout]"
+                "makeup=1:"
+                "mix=1[ducked_music];"
+                "[ducked_music][voice_mix]amix=inputs=2:"
+                "duration=longest:"
+                "dropout_transition=0:"
+                "normalize=0[aout]"
             ),
             "-map", "0:v:0",
             "-map", "[aout]",
