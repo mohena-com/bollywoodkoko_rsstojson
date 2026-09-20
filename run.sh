@@ -124,7 +124,7 @@ python "$PROJECT_DIR/qwen_slide_designer.py" --category "$CATEGORY"
 
 echo ""
 echo "[5/7] Fetching/caching verified Wikimedia Commons images..."
-python "$PROJECT_DIR/commons_image_fetcher.py" --category "$CATEGORY"
+python "$PROJECT_DIR/commons_image_fetcher.py" --category "$CATEGORY"   
 
 echo "[6/7] Painting slides..."
 python "$PROJECT_DIR/paint_slides.py" --category "$CATEGORY"

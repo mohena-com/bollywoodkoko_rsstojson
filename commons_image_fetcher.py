@@ -21,7 +21,7 @@ import requests
 import yaml
 
 
-DEBUG = False
+DEBUG = True
 
 def log(message, level="INFO"):
     """Consistent diagnostic logging. DEBUG messages appear only with --debug."""
@@ -500,8 +500,8 @@ def main():
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     global DEBUG
-    DEBUG = args.debug
-    log(f"Debug logging: {DEBUG}")
+    DEBUG = True
+    log("Debug logging: ON (default)")
 
     config = load_config(args.config)
     output_root = Path(config["output"]["folder"])
