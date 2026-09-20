@@ -315,17 +315,32 @@ def parse_qwen_json(raw_text):
     except json.JSONDecodeError:
         pass
 
-    # Try extracting the first JSON object.
+    # Robustly extract the first complete JSON object. Qwen can sometimes
+    # append stray text or hidden output after an otherwise valid JSON object.
     start = text.find("{")
-    end = text.rfind("}")
-
-    if start >= 0 and end > start:
-        candidate = text[start : end + 1]
-
+    if start >= 0:
+        decoder = json.JSONDecoder()
         try:
-            return json.loads(candidate)
+            data, _ = decoder.raw_decode(text[start:])
+            if isinstance(data, dict):
+                return data
         except json.JSONDecodeError:
             pass
+
+    # Last-resort extraction using the outermost braces.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidate = text[start:end + 1].strip()
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Could not parse valid JSON from Qwen response. "
+                f"Parser error: {exc}\nRaw response:\n{text}"
+            ) from exc
 
     raise ValueError(
         "Could not parse valid JSON from Qwen response.\n"
