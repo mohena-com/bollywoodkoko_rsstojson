@@ -248,6 +248,76 @@ def download(url):
         return None
 
 
+def load_slide_image(data):
+    """Load only a verified local image when licensed-image mode is enabled."""
+    slide = data.get("slide", {})
+    open_image = data.get("open_image", {}) or {}
+
+    local_file = open_image.get("local_file")
+    if local_file:
+        path = Path(local_file)
+        if path.exists():
+            try:
+                return Image.open(path).convert("RGB")
+            except Exception as exc:
+                print(f"    [WARN] Local image load failed: {exc}")
+
+    return None
+
+
+def cinematic_background(width, height, seed_text=""):
+    """Create a deterministic, text-friendly cinematic fallback background."""
+    import hashlib
+    import random
+
+    seed = int(hashlib.sha256(str(seed_text).encode("utf-8")).hexdigest()[:8], 16)
+    rng = random.Random(seed)
+
+    # Deep charcoal/navy base with a subtle warm/cool cinematic glow.
+    base = Image.new("RGB", (width, height), (14, 16, 24))
+    px = base.load()
+    cx1 = int(width * (0.18 + rng.random() * 0.64))
+    cy1 = int(height * (0.20 + rng.random() * 0.50))
+    cx2 = int(width * (0.65 + rng.random() * 0.25))
+    cy2 = int(height * (0.15 + rng.random() * 0.65))
+    r1 = max(width, height) * 0.58
+    r2 = max(width, height) * 0.46
+
+    for y in range(height):
+        for x in range(width):
+            # Vertical darkening keeps lower text readable.
+            vignette = 1.0 - 0.30 * ((y / max(height - 1, 1)) ** 1.7)
+            d1 = ((x - cx1) ** 2 + (y - cy1) ** 2) ** 0.5 / r1
+            d2 = ((x - cx2) ** 2 + (y - cy2) ** 2) ** 0.5 / r2
+            g1 = max(0.0, 1.0 - d1) ** 2
+            g2 = max(0.0, 1.0 - d2) ** 2
+            r = int((18 + 38 * g1 + 28 * g2) * vignette)
+            g = int((20 + 18 * g1 + 8 * g2) * vignette)
+            b = int((31 + 48 * g1 + 20 * g2) * vignette)
+            px[x, y] = (max(8, r), max(10, g), max(16, b))
+
+    # Soft cinematic light streaks and grain, kept subtle behind typography.
+    glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    accent = (220, 120, 80, 42) if seed % 2 else (90, 150, 220, 42)
+    for i in range(3):
+        y = int(height * (0.20 + i * 0.25 + rng.uniform(-0.03, 0.03)))
+        gd.line((0, y, width, y - int(height * 0.10)), fill=accent, width=max(2, int(width * 0.006)))
+    glow = glow.filter(ImageFilter.GaussianBlur(max(10, int(width * 0.018))))
+    base = Image.alpha_composite(base.convert("RGBA"), glow)
+
+    # Fine grain adds texture without competing with the text.
+    grain = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grain)
+    step = max(3, int(width / 360))
+    for y in range(0, height, step):
+        for x in range(0, width, step):
+            if rng.random() < 0.055:
+                a = rng.randint(5, 16)
+                gd.point((x, y), fill=(255, 255, 255, a))
+    return Image.alpha_composite(base, grain).convert("RGB")
+
+
 def cover(image, width, height, position="center"):
     if image is None:
         return Image.new("RGB", (width, height), (18, 18, 22))
@@ -931,18 +1001,36 @@ def render(data, output, width, height):
     else:
         image_position = "center"
 
-    image = download(s.get("image_url", ""))
-    canvas = cover(
-        image,
-        width,
-        height,
-        position=image_position,
-    ).convert("RGBA")
+    # In the licensed-image pipeline, only the image fetched and verified by
+    # commons_image_fetcher.py is eligible for rendering. The original RSS
+    # image_url is deliberately ignored to avoid silently reusing publisher
+    # images whose license is unknown.
+    image = load_slide_image(data)
+    if image is None and s.get("image_url"):
+        print("    [INFO] Remote source image ignored; no verified local image.")
 
-    canvas = apply_image_treatment(
-        canvas,
-        design["image_treatment"],
-    )
+    if image is not None:
+        canvas = cover(
+            image,
+            width,
+            height,
+            position=image_position,
+        ).convert("RGBA")
+
+        canvas = apply_image_treatment(
+            canvas,
+            design["image_treatment"],
+        )
+    else:
+        # No verified reusable image: use a polished deterministic cinematic
+        # background instead of the original publisher image or a blank card.
+        seed_text = "{}:{}:{}".format(
+            s.get("category", ""),
+            s.get("number", ""),
+            headline,
+        )
+        canvas = cinematic_background(width, height, seed_text).convert("RGBA")
+        print("    [INFO] No verified image; using cinematic fallback background.")
 
     draw = ImageDraw.Draw(canvas)
 

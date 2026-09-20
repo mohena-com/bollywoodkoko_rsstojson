@@ -52,3 +52,15 @@ qwen:
   model: "qwen3:8b"
   temperature: 0.2
   timeout: 120
+images:
+  provider: "wikimedia_commons"
+  commons_api: "https://commons.wikimedia.org/w/api.php"
+  commons_file_page: "https://commons.wikimedia.org/wiki/"
+  cache_folder: "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/data/images"
+  allow_remote_source_images: false
+  allowed_licenses:
+    - "Public domain"
+    - "CC0"
+    - "CC BY 4.0"
+    - "CC BY 3.0"
+    - "CC BY 2.0"

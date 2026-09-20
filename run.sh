@@ -81,7 +81,7 @@ echo ""
 # --------------------------------------------------
 
 if [ -d "$OP_JSON" ]; then
-    echo "[1/5] Archiving existing OP_JSON..."
+    echo "[1/7] Archiving existing OP_JSON..."
 
     mkdir -p "$ARCHIVE_DIR"
 
@@ -95,7 +95,7 @@ if [ -d "$OP_JSON" ]; then
     echo "      Archived to:"
     echo "      $ARCHIVE_DIR/OP_JSON"
 else
-    echo "[1/5] No existing OP_JSON folder to archive."
+    echo "[1/7] No existing OP_JSON folder to archive."
 fi
 
 # --------------------------------------------------
@@ -103,7 +103,7 @@ fi
 # --------------------------------------------------
 
 echo ""
-echo "[2/5] Running RSS extractor for date: $TARGET_DATE..."
+echo "[2/7] Running RSS extractor for date: $TARGET_DATE..."
 python "$PROJECT_DIR/bh_rss_extractor.py" --date "$TARGET_DATE"
 
 # --------------------------------------------------
@@ -111,7 +111,7 @@ python "$PROJECT_DIR/bh_rss_extractor.py" --date "$TARGET_DATE"
 # --------------------------------------------------
 
 echo ""
-echo "[3/5] Running Qwen converter for category: $CATEGORY..."
+echo "[3/7] Running Qwen converter for category: $CATEGORY..."
 python "$PROJECT_DIR/qwen_converter.py" --category "$CATEGORY"
 
 # --------------------------------------------------
@@ -119,11 +119,14 @@ python "$PROJECT_DIR/qwen_converter.py" --category "$CATEGORY"
 # --------------------------------------------------
 
 echo ""
-echo "[4/5] Generating slide designs..."
+echo "[4/7] Generating slide designs..."
 python "$PROJECT_DIR/qwen_slide_designer.py" --category "$CATEGORY"
 
 echo ""
-echo "      Painting slides..."
+echo "[5/7] Fetching/caching verified Wikimedia Commons images..."
+python "$PROJECT_DIR/commons_image_fetcher.py" --category "$CATEGORY"
+
+echo "[6/7] Painting slides..."
 python "$PROJECT_DIR/paint_slides.py" --category "$CATEGORY"
 
 # --------------------------------------------------
@@ -131,7 +134,7 @@ python "$PROJECT_DIR/paint_slides.py" --category "$CATEGORY"
 # --------------------------------------------------
 
 echo ""
-echo "[5/5] Creating reels for category: $CATEGORY..."
+echo "[7/7] Creating reels for category: $CATEGORY..."
 python "$PROJECT_DIR/create_reel_with_list_categories.py" --category "$CATEGORY"
 
 echo ""
