@@ -135,7 +135,9 @@ python "$PROJECT_DIR/paint_slides.py" --category "$CATEGORY"
 
 echo ""
 echo "[7/7] Creating reels for category: $CATEGORY..."
-python "$PROJECT_DIR/create_reel_with_list_categories.py" --category "$CATEGORY"
+# python "$PROJECT_DIR/create_reel_with_list_categories.py" --category "$CATEGORY"
+python "$PROJECT_DIR/create_reel_category_tts.py" --category "$CATEGORY"
+
 
 echo ""
 echo "=========================================="
