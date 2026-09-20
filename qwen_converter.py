@@ -354,9 +354,11 @@ def qwen_summarize(
 
     prompt_template = PROMPT_TEMPLATE
 
-    prompt = prompt_template.format(
-        title=title,
-        description=description,
+    # Do not use str.format() here: qwen_converter.properties contains
+    # literal JSON braces, which str.format() interprets as placeholders.
+    # Replace only the two intended prompt variables.
+    prompt = prompt_template.replace("{title}", title).replace(
+        "{description}", description
     )
 
     
