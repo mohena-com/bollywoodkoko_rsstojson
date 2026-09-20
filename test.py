@@ -1,235 +1,371 @@
+#!/usr/bin/env python3
+
+"""
+Wikipedia Image Fetcher
+
+Usage:
+    python wikipedia_image_fetcher.py "Deepika Padukone"
+
+The program:
+1. Searches Wikipedia for the requested entity.
+2. Finds the best matching article.
+3. Retrieves the article's main image.
+4. Downloads the image from upload.wikimedia.org.
+5. Saves the image and metadata locally.
+
+It deliberately does NOT call commons.wikimedia.org.
+"""
+
+import argparse
 import json
 import re
+import sys
 from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
 
 import requests
 
 
-# ------------------------------------------------------------
+# ============================================================
 # CONFIG
-# ------------------------------------------------------------
+# ============================================================
 
-QUERY = "Deepika Padukone"
+WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
 
-OUTPUT_DIR = Path("./wikimedia_test")
-IMAGE_FILE = OUTPUT_DIR / "deepika_padukone.jpg"
-METADATA_FILE = OUTPUT_DIR / "deepika_padukone_metadata.json"
-
-COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+OUTPUT_ROOT = Path("./wikipedia_images")
 
 USER_AGENT = (
     "BollywoodKoko/1.0 "
-    "(Wikimedia Commons image test; contact: your-email@example.com)"
+    "(Wikipedia image fetcher; contact: your-email@example.com)"
 )
 
-ALLOWED_LICENSES = {
-    "public domain",
-    "cc0",
-    "cc by 4.0",
-    "cc by 3.0",
-    "cc by 2.0",
-}
+TIMEOUT = 30
+
+# Minimum image dimensions we will accept.
+MIN_WIDTH = 300
+MIN_HEIGHT = 300
 
 
-# ------------------------------------------------------------
-# HELPERS
-# ------------------------------------------------------------
+# ============================================================
+# HTTP SESSION
+# ============================================================
 
-def clean(value):
-    if not value:
-        return ""
-    return re.sub(r"\s+", " ", str(value)).strip()
+session = requests.Session()
 
-
-def normalize_license(value):
-    value = clean(value).lower()
-
-    value = value.replace("creative commons attribution 4.0", "cc by 4.0")
-    value = value.replace("creative commons attribution 3.0", "cc by 3.0")
-    value = value.replace("creative commons attribution 2.0", "cc by 2.0")
-    value = value.replace("creative commons zero", "cc0")
-
-    return value
-
-
-def get_license(extmetadata):
-    license_short = clean(
-        extmetadata.get("LicenseShortName", {}).get("value", "")
-    )
-
-    usage_terms = clean(
-        extmetadata.get("UsageTerms", {}).get("value", "")
-    )
-
-    license_url = clean(
-        extmetadata.get("LicenseUrl", {}).get("value", "")
-    )
-
-    return license_short, usage_terms, license_url
-
-
-def license_allowed(license_short, usage_terms):
-    values = {
-        normalize_license(license_short),
-        normalize_license(usage_terms),
+session.headers.update(
+    {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Connection": "close",
     }
-
-    for value in values:
-        if value in ALLOWED_LICENSES:
-            return True
-
-    return False
+)
 
 
-# ------------------------------------------------------------
-# SEARCH WIKIMEDIA
-# ------------------------------------------------------------
+# ============================================================
+# HELPERS
+# ============================================================
 
-def search_wikimedia(query):
+def slugify(text):
+    """
+    Convert an entity name into a safe directory/file name.
+    """
 
+    text = text.strip().lower()
+
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+
+    text = text.strip("_")
+
+    return text or "unknown"
+
+
+def clean(text):
+    if not text:
+        return ""
+
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def safe_filename(text):
+    """
+    Make a safe filename while retaining readability.
+    """
+
+    text = clean(text)
+
+    text = re.sub(r'[<>:"/\\|?*]', "_", text)
+
+    text = text.strip(". ")
+
+    return text or "image"
+
+
+# ============================================================
+# WIKIPEDIA SEARCH
+# ============================================================
+
+def search_wikipedia(query):
+    """
+    Search English Wikipedia and return candidate articles.
+    """
+
+    print()
     print("=" * 70)
-    print(f"Searching Wikimedia Commons for: {query}")
+    print("WIKIPEDIA SEARCH")
     print("=" * 70)
+    print("Query:", query)
 
     params = {
         "action": "query",
         "format": "json",
 
-        # Search files
-        "generator": "search",
-        "gsrsearch": query,
-        "gsrnamespace": "6",
-        "gsrlimit": "10",
+        "list": "search",
+        "srsearch": query,
+        "srnamespace": 0,
+        "srlimit": 10,
 
-        # Get image information + metadata
-        "prop": "imageinfo|info",
-        "iiprop": "url|mime|size|extmetadata",
-        "iiurlwidth": "1600",
+        "utf8": 1,
     }
-
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-        "Connection": "close",
-    }
-    print(f"COMMONS_API : {COMMONS_API}")
-    print(f"params : {params}")
-    print(f"headers : {headers}")
 
     try:
-        response = requests.get(
-            COMMONS_API,
+
+        response = session.get(
+            WIKIPEDIA_API,
             params=params,
-            headers=headers,
-            timeout=30,
+            timeout=TIMEOUT,
         )
 
-        print()
         print("HTTP status:", response.status_code)
-        print("URL:", response.url)
-        print()
 
         response.raise_for_status()
 
         data = response.json()
 
-    except Exception as e:
-        print("[ERROR] Wikimedia request failed:")
-        print(repr(e))
+    except Exception as exc:
+
+        print()
+        print("[ERROR] Wikipedia search failed:")
+        print(repr(exc))
+
         return []
+
+    results = data.get("query", {}).get("search", [])
+
+    candidates = []
+
+    for item in results:
+
+        title = clean(item.get("title"))
+
+        if not title:
+            continue
+
+        candidates.append(
+            {
+                "pageid": item.get("pageid"),
+                "title": title,
+                "snippet": clean(
+                    re.sub(
+                        r"<.*?>",
+                        "",
+                        item.get("snippet", ""),
+                    )
+                ),
+            }
+        )
+
+    print("Results:", len(candidates))
+
+    for index, candidate in enumerate(candidates, start=1):
+
+        print(
+            f"{index:2}. "
+            f"{candidate['title']} "
+            f"(pageid={candidate['pageid']})"
+        )
+
+    return candidates
+
+
+# ============================================================
+# FIND BEST ARTICLE
+# ============================================================
+
+def choose_article(query, candidates):
+    """
+    Prefer exact title match.
+    Otherwise use the first Wikipedia search result.
+    """
+
+    if not candidates:
+        return None
+
+    normalized_query = clean(query).casefold()
+
+    # Exact title match.
+    for candidate in candidates:
+
+        if candidate["title"].casefold() == normalized_query:
+
+            print()
+            print("[INFO] Exact article match:")
+            print(candidate["title"])
+
+            return candidate
+
+    # Otherwise first result.
+    candidate = candidates[0]
+
+    print()
+    print("[INFO] Using top Wikipedia result:")
+    print(candidate["title"])
+
+    return candidate
+
+
+# ============================================================
+# GET ARTICLE IMAGE
+# ============================================================
+
+def get_article_image(pageid):
+    """
+    Get the original image associated with the Wikipedia article.
+    """
+
+    params = {
+        "action": "query",
+        "format": "json",
+
+        "pageids": pageid,
+
+        "prop": "pageimages",
+        "piprop": "original",
+
+        "pilicense": "any",
+    }
+
+    print()
+    print("=" * 70)
+    print("GETTING ARTICLE IMAGE")
+    print("=" * 70)
+
+    try:
+
+        response = session.get(
+            WIKIPEDIA_API,
+            params=params,
+            timeout=TIMEOUT,
+        )
+
+        print("HTTP status:", response.status_code)
+
+        response.raise_for_status()
+
+        data = response.json()
+
+    except Exception as exc:
+
+        print()
+        print("[ERROR] Failed to get article image:")
+        print(repr(exc))
+
+        return None
 
     pages = data.get("query", {}).get("pages", {})
 
-    results = []
+    page = pages.get(str(pageid))
 
-    for page in pages.values():
+    if not page:
 
-        title = clean(page.get("title"))
+        print("[WARN] Article page not returned.")
 
-        imageinfo = page.get("imageinfo", [])
+        return None
 
-        if not imageinfo:
-            continue
+    original = page.get("original")
 
-        info = imageinfo[0]
+    if not original:
 
-        extmetadata = info.get("extmetadata", {})
+        print("[WARN] Wikipedia article has no original image.")
 
-        license_short, usage_terms, license_url = get_license(
-            extmetadata
-        )
+        return None
 
-        result = {
-            "pageid": page.get("pageid"),
-            "title": title,
-            "file_page": (
-                "https://commons.wikimedia.org/wiki/"
-                + title.replace(" ", "_")
-            ),
-            "image_url": info.get("thumburl") or info.get("url"),
-            "original_url": info.get("url"),
-            "mime": info.get("mime"),
-            "width": info.get("width"),
-            "height": info.get("height"),
-            "license": license_short,
-            "usage_terms": usage_terms,
-            "license_url": license_url,
-        }
+    result = {
+        "pageid": page.get("pageid"),
+        "title": page.get("title"),
+        "image_url": original.get("source"),
+        "width": original.get("width"),
+        "height": original.get("height"),
+    }
 
-        results.append(result)
+    print("Title :", result["title"])
+    print("Image :", result["image_url"])
+    print(
+        "Size  :",
+        f"{result['width']} x {result['height']}",
+    )
 
-    return results
+    return result
 
 
-# ------------------------------------------------------------
-# DISPLAY RESULTS
-# ------------------------------------------------------------
+# ============================================================
+# IMAGE VALIDATION
+# ============================================================
 
-def show_results(results):
+def validate_image_info(image_info):
 
-    print("=" * 70)
-    print(f"RESULTS FOUND: {len(results)}")
-    print("=" * 70)
+    width = image_info.get("width") or 0
+    height = image_info.get("height") or 0
 
-    for i, item in enumerate(results, start=1):
-
-        allowed = license_allowed(
-            item["license"],
-            item["usage_terms"],
-        )
+    if width < MIN_WIDTH or height < MIN_HEIGHT:
 
         print()
-        print(f"[{i}] {item['title']}")
-        print("-" * 70)
+        print(
+            f"[WARN] Image too small: "
+            f"{width} x {height}"
+        )
 
-        print("License     :", item["license"])
-        print("Usage terms :", item["usage_terms"])
-        print("Dimensions  :", f"{item['width']} x {item['height']}")
-        print("MIME        :", item["mime"])
-        print("Allowed     :", allowed)
+        return False
 
-        print("Image URL   :", item["image_url"])
-        print("File page   :", item["file_page"])
-
-        if item["license_url"]:
-            print("License URL :", item["license_url"])
+    return True
 
 
-# ------------------------------------------------------------
-# DOWNLOAD
-# ------------------------------------------------------------
+# ============================================================
+# DOWNLOAD IMAGE
+# ============================================================
 
-def download_image(item):
+def download_image(image_info, output_dir):
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    image_url = image_info["image_url"]
 
-    url = item["image_url"]
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # Try to preserve the original extension.
+    parsed = urlparse(image_url)
+
+    filename = Path(
+        unquote(parsed.path)
+    ).name
+
+    filename = safe_filename(filename)
+
+    if not filename:
+        filename = "image"
+
+    # Remove Wikimedia query-derived oddities.
+    filename = filename.split("?")[0]
+
+    output_path = output_dir / filename
 
     print()
     print("=" * 70)
     print("DOWNLOADING IMAGE")
     print("=" * 70)
-    print(url)
+
+    print("URL :", image_url)
+    print("File:", output_path)
 
     headers = {
         "User-Agent": USER_AGENT,
@@ -238,77 +374,254 @@ def download_image(item):
 
     try:
 
-        response = requests.get(
-            url,
+        response = session.get(
+            image_url,
             headers=headers,
             timeout=60,
+            stream=True,
         )
 
         print("HTTP status:", response.status_code)
+        print("Content-Type:", response.headers.get("Content-Type"))
 
         response.raise_for_status()
 
-        IMAGE_FILE.write_bytes(response.content)
+        total = 0
 
-        METADATA_FILE.write_text(
-            json.dumps(item, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        with open(output_path, "wb") as file:
+
+            for chunk in response.iter_content(
+                chunk_size=1024 * 64
+            ):
+
+                if not chunk:
+                    continue
+
+                file.write(chunk)
+
+                total += len(chunk)
 
         print()
-        print("SUCCESS")
-        print("Image   :", IMAGE_FILE.resolve())
-        print("Metadata:", METADATA_FILE.resolve())
-        print("Size    :", len(response.content), "bytes")
+        print("[SUCCESS] Image downloaded.")
+        print("Path :", output_path.resolve())
+        print("Size :", f"{total:,} bytes")
 
-        return True
+        return output_path
 
-    except Exception as e:
+    except Exception as exc:
 
         print()
         print("[ERROR] Image download failed:")
-        print(repr(e))
+        print(repr(exc))
 
-        return False
+        if output_path.exists():
+
+            try:
+                output_path.unlink()
+            except Exception:
+                pass
+
+        return None
 
 
-# ------------------------------------------------------------
+# ============================================================
+# SAVE METADATA
+# ============================================================
+
+def save_metadata(
+    entity,
+    article,
+    image_info,
+    image_path,
+    output_dir,
+):
+
+    metadata = {
+        "query": entity,
+
+        "wikipedia": {
+            "api": WIKIPEDIA_API,
+            "pageid": article.get("pageid"),
+            "title": article.get("title"),
+            "url": (
+                "https://en.wikipedia.org/wiki/"
+                + quote(
+                    article["title"].replace(" ", "_"),
+                    safe="_()",
+                )
+            ),
+        },
+
+        "image": {
+            "source": image_info.get("image_url"),
+            "local_file": str(
+                image_path.resolve()
+            ),
+            "width": image_info.get("width"),
+            "height": image_info.get("height"),
+        },
+
+        "source_domain": "upload.wikimedia.org",
+
+        "license_verification": {
+            "status": "NOT_VERIFIED",
+            "note": (
+                "The Wikipedia page image was successfully "
+                "retrieved. This program does not assume that "
+                "the image license is acceptable for publication. "
+                "Verify the associated Wikimedia Commons file "
+                "license before commercial/public use."
+            ),
+        },
+    }
+
+    metadata_path = output_dir / "metadata.json"
+
+    metadata_path.write_text(
+        json.dumps(
+            metadata,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    print()
+    print("Metadata:")
+    print(metadata_path.resolve())
+
+    return metadata_path
+
+
+# ============================================================
 # MAIN
-# ------------------------------------------------------------
+# ============================================================
 
 def main():
 
-    results = search_wikimedia(QUERY)
+    parser = argparse.ArgumentParser(
+        description="Download the Wikipedia article image for an entity."
+    )
 
-    if not results:
+    parser.add_argument(
+        "query",
+        help='Entity to search, e.g. "Deepika Padukone"',
+    )
+
+    parser.add_argument(
+        "--output",
+        default=str(OUTPUT_ROOT),
+        help="Output directory",
+    )
+
+    args = parser.parse_args()
+
+    entity = clean(args.query)
+
+    if not entity:
+
+        print("[ERROR] Query cannot be empty.")
+        sys.exit(1)
+
+    output_root = Path(args.output)
+
+    entity_dir = output_root / slugify(entity)
+
+    print()
+    print("=" * 70)
+    print("WIKIPEDIA IMAGE FETCHER")
+    print("=" * 70)
+    print("Entity :", entity)
+    print("Output :", entity_dir.resolve())
+
+    # --------------------------------------------------------
+    # 1. Search Wikipedia
+    # --------------------------------------------------------
+
+    candidates = search_wikipedia(entity)
+
+    if not candidates:
+
         print()
-        print("No Wikimedia results returned.")
-        return
+        print("[RESULT] No Wikipedia article found.")
 
-    show_results(results)
+        sys.exit(2)
+
+    # --------------------------------------------------------
+    # 2. Select article
+    # --------------------------------------------------------
+
+    article = choose_article(
+        entity,
+        candidates,
+    )
+
+    if not article:
+
+        print("[RESULT] Could not select article.")
+
+        sys.exit(3)
+
+    # --------------------------------------------------------
+    # 3. Get image
+    # --------------------------------------------------------
+
+    image_info = get_article_image(
+        article["pageid"]
+    )
+
+    if not image_info:
+
+        print()
+        print("[RESULT] Article has no usable image.")
+
+        sys.exit(4)
+
+    # --------------------------------------------------------
+    # 4. Validate dimensions
+    # --------------------------------------------------------
+
+    if not validate_image_info(image_info):
+
+        sys.exit(5)
+
+    # --------------------------------------------------------
+    # 5. Download
+    # --------------------------------------------------------
+
+    image_path = download_image(
+        image_info,
+        entity_dir,
+    )
+
+    if not image_path:
+
+        sys.exit(6)
+
+    # --------------------------------------------------------
+    # 6. Metadata
+    # --------------------------------------------------------
+
+    save_metadata(
+        entity,
+        article,
+        image_info,
+        image_path,
+        entity_dir,
+    )
+
+    # --------------------------------------------------------
+    # DONE
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print("LOOKING FOR ACCEPTABLE LICENSE")
+    print("COMPLETED")
     print("=" * 70)
 
-    for item in results:
-
-        if license_allowed(
-            item["license"],
-            item["usage_terms"],
-        ):
-
-            print()
-            print("Found acceptable image:")
-            print(item["title"])
-            print("License:", item["license"])
-
-            if download_image(item):
-                return
-
-    print()
-    print("No acceptable licensed image found.")
+    print("Entity :", entity)
+    print("Article:", article["title"])
+    print("Image  :", image_path.resolve())
 
 
 if __name__ == "__main__":
