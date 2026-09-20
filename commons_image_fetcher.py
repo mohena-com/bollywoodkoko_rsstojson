@@ -704,9 +704,7 @@ def main():
     else:
         input_dir = (
             Path(
-                "/Volumes/Extreme SSD/webmaster-ai/"
-                "POJO_PROJECT/bollywood/DEV_2.0/"
-                "bollywoodkoko_rsstojson"
+                "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/bollywood"
             )
             / "OP_JSON"
             / "qwen_input"
