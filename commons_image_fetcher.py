@@ -50,44 +50,115 @@ def strip_wiki_markup(value):
 
 
 def extract_candidates(slide):
-    """Return focused search queries, not the entire article text."""
-    design = slide.get("design", {}) or {}
-    queries = []
+    """
+    Build image-search candidates with this priority:
+      1. People explicitly identified in slide/source data.
+      2. Person names extracted from the article description.
+      3. Movie/show names.
+      4. Headline as a last resort.
 
+    Person-first searching is important because Wikimedia Commons commonly
+    indexes people better than entertainment-news headlines.
+    """
+    design = slide.get("design", {}) or {}
+    source = slide.get("source", {}) or {}
+
+    people = []
+    movies = []
+
+    # Prefer structured entities if qwen_converter/qwen_slide_designer has
+    # already supplied them.
+    entities = slide.get("entities", {}) or {}
+    for value in entities.get("people", []) or []:
+        value = clean(value)
+        if value:
+            people.append(value)
+
+    for value in entities.get("movies", []) or []:
+        value = clean(value)
+        if value:
+            movies.append(value)
+
+    description = clean(source.get("description", ""))
+    headline = clean(slide.get("headline", ""))
+    source_title = clean(source.get("title", ""))
+
+    # Common Indian entertainment-news construction:
+    # "The Akshay Kumar-Saif Ali Khan starrer Haiwaan..."
+    # Extract capitalized multi-word names and names connected by hyphens.
+    name_patterns = [
+        r"\b[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}\b",
+    ]
+
+    text_to_scan = f"{description} {headline} {source_title}"
+    for pattern in name_patterns:
+        for match in re.findall(pattern, text_to_scan):
+            candidate = clean(match)
+
+            # Remove obvious non-person phrases.
+            blocked = {
+                "The Film", "The Movie", "The Weekend", "Day One",
+                "Day Two", "Day Three", "Day Four", "Day Five",
+                "Day Six", "Day Seven", "Day Eight", "Day Nine",
+                "Day Ten", "Second Friday", "First Week",
+                "Box Office", "Bollywood Hungama", "Special Analysis",
+                "Wikimedia Commons",
+            }
+
+            if candidate in blocked:
+                continue
+
+            # Don't treat obvious numeric/statistical phrases as names.
+            if re.search(r"\b(?:Day|Rs|Crore|Lakhs|Friday|Saturday|Sunday|Monday|Tuesday|Wednesday|Thursday)\b", candidate, re.I):
+                continue
+
+            if candidate not in people and len(candidate.split()) >= 2:
+                people.append(candidate)
+
+    # Handle hyphenated person names such as "Akshay Kumar-Saif Ali Khan".
+    for match in re.findall(
+        r"\b([A-Z][A-Za-z.'-]+\s+[A-Z][A-Za-z.'-]+)-([A-Z][A-Za-z.'-]+\s+[A-Z][A-Za-z.'-]+)\b",
+        description,
+    ):
+        for candidate in match:
+            candidate = clean(candidate)
+            if candidate and candidate not in people:
+                people.insert(0, candidate)
+
+    # Keep the strongest likely person candidates first.
+    people = list(dict.fromkeys(people))
+
+    # Try explicit/obvious movie title from the source title/headline.
+    for text_value in (source_title, headline):
+        match = re.search(
+            r"\b(?:starrer|film|movie|film's)\s+([A-Z][A-Za-z0-9'*-]+(?:\s+[A-Z][A-Za-z0-9'*-]+){0,3})",
+            text_value,
+            re.I,
+        )
+        if match:
+            movies.append(clean(match.group(1)))
+
+    movies = list(dict.fromkeys(movies))
+
+    # Last-resort queries from emphasis words / headline.
+    fallback = []
     emphasis = design.get("emphasis_words") or []
     if isinstance(emphasis, list):
-        words = [clean(x) for x in emphasis if clean(x)]
-        if words:
-            queries.append(" ".join(words[:5]))
+        q = " ".join(clean(x) for x in emphasis if clean(x))
+        if q:
+            fallback.append(q)
 
-    headline = clean(slide.get("headline", ""))
-    source_title = clean((slide.get("source") or {}).get("title", ""))
+    if headline:
+        fallback.append(headline)
 
-    # Prefer headline/source title, while removing generic news words.
-    text = headline or source_title
-    if text:
-        generic = r"\b(confirms?|shares?|says?|reveals?|unveils?|celebrates?|hosts?|starts?|begins?|criticizes?|expands?|recalls?|draws?|on|from|for|with|as|and|the|of|in|at|to|season|trailer|news)\b"
-        simplified = re.sub(generic, " ", text, flags=re.I)
-        simplified = re.sub(r"[^\w\s.'-]", " ", simplified)
-        simplified = re.sub(r"\s+", " ", simplified).strip()
-        if simplified:
-            queries.append(simplified[:100])
-
-    # First quoted/title-like entity chunks are useful for people and films.
-    for pattern in [r"\b[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}\b"]:
-        for match in re.findall(pattern, headline):
-            candidate = match.strip()
-            if candidate not in queries and len(candidate) > 3:
-                queries.append(candidate)
-
-    # Keep queries short and unique.
+    # Person-first, then movie/show, then generic fallback.
     result = []
-    for q in queries:
+    for q in people + movies + fallback:
         q = clean(q)
         if q and q.lower() not in {x.lower() for x in result}:
             result.append(q)
-    return result[:4]
 
+    return result[:8]
 
 def html_value(ext, key):
     item = ext.get(key) or {}
@@ -326,6 +397,7 @@ def process_slide(path, cache_root, cache, index_path, allowed, commons_api, for
             "status": "not_found",
             "provider": "Wikimedia Commons",
             "search_queries": queries,
+            "fallback": "cinematic_background",
             "reason": "No sufficiently relevant image with an allowed license was found.",
         }
         data["slide"]["image_url"] = ""
