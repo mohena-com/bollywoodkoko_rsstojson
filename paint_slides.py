@@ -249,18 +249,43 @@ def download(url):
 
 
 def load_slide_image(data):
-    """Load only a verified local image when licensed-image mode is enabled."""
-    slide = data.get("slide", {})
+    """
+    Load the locally cached Wikipedia image.
+
+    The Wikipedia fetcher deliberately records:
+        license_verification.status = NOT_VERIFIED
+
+    That status means the pipeline has not independently verified the
+    underlying Wikimedia license; it must NOT prevent a successfully
+    downloaded local image from being rendered.
+
+    We intentionally do NOT fall back to the original remote image_url.
+    """
     open_image = data.get("open_image", {}) or {}
 
-    local_file = open_image.get("local_file")
+    # Current Wikipedia fetcher structure:
+    # open_image.image.local_file
+    image = open_image.get("image", {}) or {}
+    local_file = image.get("local_file")
+
+    # Backward compatibility with the earlier structure:
+    # open_image.local_file
+    if not local_file:
+        local_file = open_image.get("local_file")
+
     if local_file:
         path = Path(local_file)
-        if path.exists():
+
+        if path.exists() and path.is_file():
             try:
+                print(
+                    f"    [INFO] Using local Wikipedia image: {path}"
+                )
                 return Image.open(path).convert("RGB")
             except Exception as exc:
-                print(f"    [WARN] Local image load failed: {exc}")
+                print(
+                    f"    [WARN] Local image load failed: {exc}"
+                )
 
     return None
 
@@ -1001,13 +1026,21 @@ def render(data, output, width, height):
     else:
         image_position = "center"
 
-    # In the licensed-image pipeline, only the image fetched and verified by
-    # commons_image_fetcher.py is eligible for rendering. The original RSS
-    # image_url is deliberately ignored to avoid silently reusing publisher
-    # images whose license is unknown.
+    # Wikipedia images are loaded ONLY from the local cache populated by
+    # wikipedia_image_fetcher.py. We deliberately ignore image_url so the
+    # pipeline never silently reuses the original publisher image.
+    #
+    # IMPORTANT:
+    # license_verification.status == NOT_VERIFIED does not mean "do not
+    # render". It means the pipeline has not independently verified the
+    # underlying Wikimedia license.
     image = load_slide_image(data)
+
     if image is None and s.get("image_url"):
-        print("    [INFO] Remote source image ignored; no verified local image.")
+        print(
+            "    [INFO] Remote source image ignored; "
+            "no local Wikipedia image."
+        )
 
     if image is not None:
         canvas = cover(
@@ -1030,7 +1063,10 @@ def render(data, output, width, height):
             headline,
         )
         canvas = cinematic_background(width, height, seed_text).convert("RGBA")
-        print("    [INFO] No verified image; using cinematic fallback background.")
+        print(
+            "    [INFO] No local Wikipedia image; "
+            "using cinematic fallback background."
+        )
 
     draw = ImageDraw.Draw(canvas)
 
