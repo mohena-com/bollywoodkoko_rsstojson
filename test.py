@@ -112,6 +112,9 @@ def search_wikimedia(query):
         "Accept": "application/json",
         "Connection": "close",
     }
+    print(f"COMMONS_API : {COMMONS_API}")
+    print(f"params : {params}")
+    print(f"headers : {headers}")
 
     try:
         response = requests.get(
