@@ -1,332 +1,366 @@
 #!/usr/bin/env python3
 """
-BollywoodKoko Wikipedia Image Fetcher
+Wikipedia image fetcher for BollywoodKoko.
 
-Replaces the previous Wikimedia Commons API fetcher.
-
-Why:
-    commons.wikimedia.org is not reachable from the current network,
-    while en.wikipedia.org and upload.wikimedia.org are reachable.
-
-Flow:
-    slide JSON
-        -> extract person/movie candidates
-        -> Wikipedia article search
-        -> article main image
-        -> upload.wikimedia.org download
-        -> persistent local cache
-        -> update slide JSON open_image
-
-Usage:
-    python wikipedia_image_fetcher.py --category news
-    python wikipedia_image_fetcher.py --category news --debug
-    python wikipedia_image_fetcher.py --category news --force
+Purpose:
+- Extract conservative, headline-first entity candidates.
+- Search Wikipedia for article images.
+- Download images into the persistent image cache.
+- Handle Wikipedia HTTP 429 with Retry-After/exponential backoff.
+- Preserve compatibility with:
+      process_slide(slide_path, image_dir, allowed=None, force=False)
+- Do NOT claim image licenses are verified.
 """
 
 import argparse
 import json
+import random
 import re
 import sys
 import time
 from pathlib import Path
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import urlparse
 
 import requests
-import yaml
 
-
-DEFAULT_CONFIG = "config.yaml"
-DEFAULT_CACHE = "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/data/images"
 
 WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
+DEFAULT_CACHE_ROOT = (
+    "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/data/images"
+)
+TIMEOUT = 20
 
-MIN_WIDTH = 300
-MIN_HEIGHT = 300
-MAX_CANDIDATES_PER_SLIDE = 3
-
-DEBUG = False
-
-
-# ---------------------------------------------------------------------
-# HTTP
-# ---------------------------------------------------------------------
+MAX_RETRIES = 4
+RETRY_DELAYS = [3, 6, 12, 24]
 
 session = requests.Session()
-
-WIKI_HEADERS = {
+session.headers.update({
     "User-Agent": (
-        "Mozilla/5.0 "
-        "(Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/153.0.0.0 Safari/537.36"
+        "BollywoodKoko/2.0 "
+        "(Wikipedia image fetcher; contact via project owner)"
     ),
     "Accept": "application/json",
-    "Connection": "close",
-}
+})
 
-IMAGE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 "
-        "(Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/153.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "image/avif,image/webp,image/apng,"
-        "image/svg+xml,image/*,*/*;q=0.8"
-    ),
-    "Referer": "https://en.wikipedia.org/",
-    "Connection": "close",
-}
-
-
-# ---------------------------------------------------------------------
-# LOGGING
-# ---------------------------------------------------------------------
 
 def log(message, level="INFO"):
-    if level == "DEBUG" and not DEBUG:
-        return
-    print(f"[IMAGE][{level}] {message}")
+    print(f"[WIKI][{level}] {message}", flush=True)
 
-
-# ---------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------
-
-def load_config(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-# ---------------------------------------------------------------------
-# TEXT HELPERS
-# ---------------------------------------------------------------------
 
 def clean(value):
-    if not value:
+    if value is None:
         return ""
-    value = re.sub(r"<[^>]+>", " ", str(value))
+
+    value = str(value)
     value = re.sub(r"\s+", " ", value)
     return value.strip()
 
 
-def slugify(value):
-    value = clean(value).lower()
-    value = re.sub(r"[^a-z0-9]+", "_", value)
-    value = value.strip("_")
-    return value[:100] or "unknown"
+def slugify(text):
+    text = str(text).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = text.strip("_")
+    return text or "unknown"
 
 
-def normalize_name(value):
-    value = clean(value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip(" ,.;:!?-–—")
+def wikipedia_get(params):
+    """
+    Rate-limit-aware Wikipedia API request.
+    """
 
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = session.get(
+                WIKIPEDIA_API,
+                params=params,
+                timeout=TIMEOUT,
+            )
 
-def looks_like_bad_candidate(value):
-    """Reject dates, generic phrases, sentences and obvious noise."""
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
 
-    value = normalize_name(value)
+                if retry_after:
+                    try:
+                        delay = float(retry_after)
+                    except ValueError:
+                        delay = RETRY_DELAYS[
+                            min(attempt, len(RETRY_DELAYS) - 1)
+                        ]
+                else:
+                    delay = RETRY_DELAYS[
+                        min(attempt, len(RETRY_DELAYS) - 1)
+                    ]
 
-    if not value:
-        return True
+                delay += random.uniform(0.5, 1.5)
 
-    if len(value) > 80:
-        return True
+                log(
+                    f"HTTP 429. Waiting {delay:.1f}s before retry...",
+                    "WARN",
+                )
+                time.sleep(delay)
+                continue
 
-    words = value.split()
+            response.raise_for_status()
+            return response
 
-    if len(words) > 6:
-        return True
+        except requests.RequestException as exc:
+            if attempt >= MAX_RETRIES - 1:
+                log(
+                    f"Request failed after {MAX_RETRIES} attempts: {exc}",
+                    "ERROR",
+                )
+                return None
 
-    # Dates / years.
-    if re.fullmatch(r"\d{1,2}(st|nd|rd|th)?\s+\w+\s+\d{4}", value, re.I):
-        return True
+            delay = RETRY_DELAYS[
+                min(attempt, len(RETRY_DELAYS) - 1)
+            ]
 
-    if re.fullmatch(r"\d{4}", value):
-        return True
+            log(
+                f"Request failed: {exc}. Retrying in {delay}s...",
+                "WARN",
+            )
+            time.sleep(delay)
 
-    # Generic sentence fragments which appeared in the old extractor.
-    bad_phrases = {
-        "will release on",
-        "will hit theatres on",
-        "live with",
-        "tickets",
-        "around themes of love and family",
-        "latest directorial venture",
-        "and its creative team",
-    }
+    return None
 
-    if value.casefold() in bad_phrases:
-        return True
-
-    # Must contain at least one alphabetic character.
-    if not re.search(r"[A-Za-z]", value):
-        return True
-
-    return False
-
-
-def add_candidate(candidates, value):
-    value = normalize_name(value)
-
-    if looks_like_bad_candidate(value):
-        return
-
-    key = value.casefold()
-
-    if key not in {x.casefold() for x in candidates}:
-        candidates.append(value)
-
-
-# ---------------------------------------------------------------------
-# CANDIDATE EXTRACTION
-# ---------------------------------------------------------------------
 
 def extract_candidates(data):
     """
-    Person/movie-first extraction.
+    Extract high-quality Wikipedia search candidates.
 
     Priority:
-      1. structured entities.people / movies
-      2. explicit person/movie patterns
-      3. capitalized proper-name sequences from headline/title
-      4. emphasis words
+      1. Qwen emphasis words
+      2. Headline
+      3. Hero text
+      4. Supporting text
 
-    Maximum of three Wikipedia searches per slide.
+    The function intentionally avoids arbitrary sentence fragments,
+    dates and generic phrases.
     """
 
     slide = data.get("slide", data)
+    design = data.get("design", {}) or {}
 
     candidates = []
 
-    # 1. Structured entities if Qwen has supplied them.
-    entities = slide.get("entities") or data.get("entities") or {}
+    def add(value, reason=""):
+        if not value:
+            return
 
-    people = entities.get("people", []) if isinstance(entities, dict) else []
-    movies = entities.get("movies", []) if isinstance(entities, dict) else []
+        value = clean(value)
+        if not value:
+            return
 
-    if isinstance(people, str):
-        people = [people]
+        reject = {
+            "baby girl",
+            "social media post",
+            "foot image",
+            "announcement",
+            "date",
+            "bollywood news",
+            "latest news",
+            "news",
+            "industry",
+            "live",
+            "title track",
+        }
 
-    if isinstance(movies, str):
-        movies = [movies]
+        if value.casefold() in reject:
+            return
 
-    for value in people:
-        if isinstance(value, dict):
-            value = (
-                value.get("name")
-                or value.get("person")
-                or value.get("title")
-                or ""
-            )
-        add_candidate(candidates, value)
+        # Reject obvious dates.
+        if re.fullmatch(
+            r"(January|February|March|April|May|June|July|August|"
+            r"September|October|November|December)\s+\d{1,2}"
+            r"(,\s*\d{4})?",
+            value,
+            re.I,
+        ):
+            return
 
-    for value in movies:
-        if isinstance(value, dict):
-            value = (
-                value.get("name")
-                or value.get("title")
-                or value.get("movie")
-                or ""
-            )
-        add_candidate(candidates, value)
+        if re.fullmatch(
+            r"\d{1,2}(st|nd|rd|th)?\s+\w+\s+\d{4}",
+            value,
+            re.I,
+        ):
+            return
 
-    # 2. Headline/title sources.
-    texts = []
+        # Wikipedia search candidates should be entity-like.
+        if len(value.split()) > 6:
+            return
 
-    for key in ("headline", "title", "hero_text"):
-        value = slide.get(key)
-        if value:
-            texts.append(clean(value))
+        if value.endswith((".", ",", ":", ";")):
+            return
 
-    source = slide.get("source") or data.get("source") or {}
-    if isinstance(source, dict):
-        for key in ("title", "headline"):
-            value = source.get(key)
-            if value:
-                texts.append(clean(value))
+        generic = {
+            "the",
+            "will release",
+            "will release on",
+            "has been postponed",
+            "social media",
+            "avoid clash",
+            "clash",
+            "release",
+            "released",
+            "pushed",
+            "incoming",
+        }
 
-    # Some versions of the converter put the source title here.
-    for key in ("source_title", "original_title"):
-        value = slide.get(key)
-        if value:
-            texts.append(clean(value))
+        if value.casefold() in generic:
+            return
 
-    # 3. Strong role patterns.
-    role_pattern = re.compile(
-        r"\b(?:starring|starrer|stars|starred by|"
-        r"actor|actress|director|producer|"
-        r"with|featuring|feat\.?)\s+"
-        r"([A-Z][A-Za-z.'’\-]+"
-        r"(?:\s+[A-Z][A-Za-z.'’\-]+){1,3})"
-    )
+        if value not in candidates:
+            candidates.append(value)
+            if reason:
+                log(f"candidate += {value!r} ({reason})", "DEBUG")
 
-    for text in texts:
-        for match in role_pattern.finditer(text):
-            add_candidate(candidates, match.group(1))
+    # ---------------------------------------------------------
+    # 1. Explicit Qwen emphasis words
+    # ---------------------------------------------------------
 
-    # 4. Capitalized proper-name sequences.
-    # Avoid common headline words.
-    stop = {
-        "The", "This", "That", "With", "After", "Before", "Latest",
-        "Exclusive", "Confirmed", "Big", "New", "Film", "Movie",
-        "Series", "Actor", "Actress", "Director", "Producer",
-        "Release", "Date", "January", "February", "March", "April",
-        "May", "June", "July", "August", "September", "October",
-        "November", "December", "Monday", "Tuesday", "Wednesday",
-        "Thursday", "Friday", "Saturday", "Sunday",
-        "India", "Indian",
-    }
-
-    proper_pattern = re.compile(
-        r"\b[A-Z][A-Za-z.'’\-]+"
-        r"(?:\s+[A-Z][A-Za-z.'’\-]+){1,3}\b"
-    )
-
-    for text in texts:
-        for match in proper_pattern.finditer(text):
-            candidate = match.group(0)
-            first = candidate.split()[0]
-
-            if first in stop:
-                continue
-
-            add_candidate(candidates, candidate)
-
-    # 5. Quoted titles.
-    for text in texts:
-        for match in re.findall(r"[“\"]([^”\"]{2,60})[”\"]", text):
-            add_candidate(candidates, match)
-
-    # 6. Emphasis words only as a last resort, and only if they form
-    # a plausible multi-word proper name.
-    emphasis = slide.get("emphasis_words") or slide.get("emphasis") or []
+    emphasis = design.get("emphasis_words", [])
 
     if isinstance(emphasis, str):
         emphasis = [emphasis]
 
-    for value in emphasis:
-        if isinstance(value, dict):
-            value = value.get("text") or value.get("word") or ""
-        if " " in str(value):
-            add_candidate(candidates, value)
+    for item in emphasis:
+        add(item, "Qwen emphasis")
 
-    # Remove obvious sentence-like candidates.
-    candidates = [
-        x for x in candidates
-        if not looks_like_bad_candidate(x)
+    # ---------------------------------------------------------
+    # 2. Headline / hero text
+    # ---------------------------------------------------------
+
+    headline = (
+        slide.get("headline")
+        or data.get("headline")
+        or design.get("hero_text")
+        or ""
+    )
+
+    headline = clean(headline)
+
+    # Capitalized multi-word entities.
+    proper_name_pattern = re.compile(
+        r"\b"
+        r"(?:[A-Z][A-Za-zÀ-ÖØ-öø-ÿ0-9'-]*"
+        r"(?:\s+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ0-9'-]*){1,5})"
+        r"\b"
+    )
+
+    for match in proper_name_pattern.findall(headline):
+        add(match, "headline proper-name")
+
+    # Specific useful patterns.
+    patterns = [
+        # X's Ranger / X's January
+        r"\b([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,3})"
+        r"['’]s\s+([A-Z][A-Za-z0-9'-]+)",
+
+        # Golmaal 5 / Housefull 5 etc.
+        r"\b([A-Z][A-Za-z]+(?:\s+\d+))\b",
+
+        # Karnataka High Court / Bombay High Court etc.
+        r"\b([A-Z][A-Za-z]+\s+"
+        r"(?:High|Supreme|District)\s+Court)\b",
+
+        # Capitalized movie/person names.
+        r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,4})\b",
     ]
 
-    return candidates[:MAX_CANDIDATES_PER_SLIDE]
+    for pattern in patterns:
+        for match in re.findall(pattern, headline):
+            if isinstance(match, tuple):
+                for item in match:
+                    add(item, "headline pattern")
+            else:
+                add(match, "headline pattern")
 
+    # ---------------------------------------------------------
+    # 3. Clean possessives and duplicates
+    # ---------------------------------------------------------
 
-# ---------------------------------------------------------------------
-# WIKIPEDIA SEARCH
-# ---------------------------------------------------------------------
+    cleaned_candidates = []
+
+    for candidate in candidates:
+        candidate = re.sub(r"['’]s$", "", candidate).strip()
+
+        if candidate and candidate not in cleaned_candidates:
+            cleaned_candidates.append(candidate)
+
+    candidates = cleaned_candidates
+
+    # ---------------------------------------------------------
+    # 4. Supporting text only if headline produced too little
+    # ---------------------------------------------------------
+
+    if len(candidates) < 2:
+        supporting = (
+            design.get("supporting_text")
+            or slide.get("summary")
+            or data.get("summary")
+            or ""
+        )
+
+        for match in proper_name_pattern.findall(clean(supporting)):
+            add(match, "supporting text")
+
+    # ---------------------------------------------------------
+    # 5. Final quality filter
+    # ---------------------------------------------------------
+
+    blacklist = {
+        "the",
+        "this",
+        "that",
+        "will",
+        "has",
+        "have",
+        "with",
+        "from",
+        "into",
+        "avoid",
+        "clash",
+        "release",
+        "released",
+        "postponed",
+        "pushed",
+        "incoming",
+        "live",
+        "title track",
+        "january",
+        "september",
+    }
+
+    final = []
+
+    for candidate in candidates:
+        candidate = clean(candidate)
+
+        if not candidate:
+            continue
+
+        if candidate.casefold() in blacklist:
+            continue
+
+        if len(candidate.split()) > 5:
+            continue
+
+        if re.search(r"\.\s", candidate):
+            continue
+
+        if candidate not in final:
+            final.append(candidate)
+
+    # Limit API searches.
+    final = final[:4]
+
+    log("Extracted search candidates:")
+
+    for index, candidate in enumerate(final, 1):
+        log(f"  {index}. {candidate}")
+
+    return final
+
 
 def search_wikipedia(query):
     params = {
@@ -334,584 +368,308 @@ def search_wikipedia(query):
         "format": "json",
         "list": "search",
         "srsearch": query,
+        "srlimit": 5,
         "srnamespace": 0,
-        "srlimit": 8,
-        "utf8": 1,
     }
 
-    log(f'Searching Wikipedia: "{query}"')
+    response = wikipedia_get(params)
+
+    if response is None:
+        return []
 
     try:
-        response = session.get(
-            WIKIPEDIA_API,
-            params=params,
-            headers=WIKI_HEADERS,
-            timeout=30,
-        )
-
-        log(f"HTTP {response.status_code} for query={query!r}", "DEBUG")
-        response.raise_for_status()
-
-        return response.json().get("query", {}).get("search", [])
-
-    except Exception as exc:
-        log(f'Wikipedia search failed for "{query}": {exc}', "ERROR")
+        payload = response.json()
+    except ValueError:
         return []
+
+    return payload.get("query", {}).get("search", [])
 
 
 def choose_article(query, results):
     if not results:
         return None
 
-    normalized = clean(query).casefold()
+    q = clean(query).casefold()
 
-    # Exact match.
-    for result in results:
-        title = clean(result.get("title"))
-        if title.casefold() == normalized:
-            return result
+    # Exact title first.
+    for item in results:
+        title = clean(item.get("title", ""))
+        if title.casefold() == q:
+            return title
 
-    # Score title overlap.
-    query_words = {
-        w.casefold()
-        for w in re.findall(r"[A-Za-z0-9]+", query)
-        if len(w) > 2
-    }
-
-    scored = []
-
-    for result in results:
-        title = clean(result.get("title"))
-        title_words = {
-            w.casefold()
-            for w in re.findall(r"[A-Za-z0-9]+", title)
-            if len(w) > 2
-        }
-
-        overlap = len(query_words & title_words)
-        exact_prefix = title.casefold().startswith(normalized)
-
-        score = overlap * 10 + (5 if exact_prefix else 0)
-
-        scored.append((score, result))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-
-    return scored[0][1]
+    # Otherwise first search result.
+    return clean(results[0].get("title", ""))
 
 
-# ---------------------------------------------------------------------
-# ARTICLE IMAGE
-# ---------------------------------------------------------------------
-
-def get_article_image(pageid):
+def get_article_image(title):
     params = {
         "action": "query",
         "format": "json",
-        "pageids": pageid,
+        "titles": title,
         "prop": "pageimages",
         "piprop": "original",
-        "pilicense": "any",
     }
 
+    response = wikipedia_get(params)
+
+    if response is None:
+        return None
+
     try:
-        response = session.get(
-            WIKIPEDIA_API,
-            params=params,
-            headers=WIKI_HEADERS,
-            timeout=30,
-        )
+        payload = response.json()
+    except ValueError:
+        return None
 
-        log(
-            f"Image metadata HTTP {response.status_code} "
-            f"for pageid={pageid}",
-            "DEBUG",
-        )
+    pages = (
+        payload.get("query", {})
+        .get("pages", {})
+    )
 
-        response.raise_for_status()
-
-        pages = response.json().get("query", {}).get("pages", {})
-        page = pages.get(str(pageid))
-
-        if not page:
-            return None
-
+    for page in pages.values():
         original = page.get("original")
 
         if not original:
-            return None
+            continue
 
         return {
-            "pageid": page.get("pageid"),
-            "title": page.get("title"),
-            "image_url": original.get("source"),
+            "title": page.get("title", title),
+            "source_url": original.get("source", ""),
             "width": original.get("width"),
             "height": original.get("height"),
         }
 
-    except Exception as exc:
-        log(
-            f"Failed to retrieve image metadata for pageid={pageid}: {exc}",
-            "ERROR",
-        )
+    return None
+
+
+def find_wikipedia_image(query):
+    log(f'Candidate "{query}"')
+
+    results = search_wikipedia(query)
+
+    if not results:
+        log(f'No Wikipedia results for "{query}"', "DEBUG")
         return None
 
+    title = choose_article(query, results)
 
-# ---------------------------------------------------------------------
-# IMAGE DOWNLOAD
-# ---------------------------------------------------------------------
+    if not title:
+        return None
 
-def clean_image_url(url):
-    """
-    Remove Wikipedia API tracking parameters.
+    log(f"Selected article: {title}")
 
-    Example:
-      ...png?utm_source=en.wikipedia.org...
-    becomes:
-      ...png
-    """
+    image = get_article_image(title)
 
-    parsed = urlparse(url)
+    if not image:
+        log(f"No article image for {title!r}", "DEBUG")
+        return None
 
-    return (
-        f"{parsed.scheme}://"
-        f"{parsed.netloc}"
-        f"{parsed.path}"
-    )
-
-
-def image_extension(url, content_type=""):
-    path = urlparse(url).path.lower()
-
-    for ext in (".jpg", ".jpeg", ".png", ".webp"):
-        if path.endswith(ext):
-            return ext
-
-    content_type = content_type.lower()
-
-    if "jpeg" in content_type:
-        return ".jpg"
-    if "png" in content_type:
-        return ".png"
-    if "webp" in content_type:
-        return ".webp"
-
-    return ".jpg"
+    return {
+        "provider": "Wikipedia / Wikimedia",
+        "status": "ok",
+        "entity": title,
+        "image": image,
+        "license_verification": {
+            "status": "NOT_VERIFIED",
+            "reason": (
+                "Image was retrieved through Wikipedia. "
+                "The pipeline does not independently verify "
+                "the underlying Wikimedia Commons license."
+            ),
+        },
+    }
 
 
-def download_image(url, output_path):
-    clean_url = clean_image_url(url)
+def get_cache_root(data=None, image_dir=None):
+    if image_dir:
+        return Path(image_dir)
 
-    log(f"Original image URL: {url}", "DEBUG")
-    log(f"Clean image URL: {clean_url}", "DEBUG")
+    config = data.get("config", {}) if isinstance(data, dict) else {}
+
+    images_config = config.get("images", {}) or {}
+
+    configured = images_config.get("cache_folder")
+
+    if configured:
+        return Path(configured)
+
+    return Path(DEFAULT_CACHE_ROOT)
+
+
+def download_image(url, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         response = session.get(
-            clean_url,
-            headers=IMAGE_HEADERS,
-            timeout=60,
+            url,
+            timeout=TIMEOUT,
             stream=True,
-            allow_redirects=True,
-        )
-
-        log(
-            f"Image HTTP {response.status_code}; "
-            f"Content-Type={response.headers.get('Content-Type')}",
-            "DEBUG",
         )
 
         response.raise_for_status()
 
-        content_type = response.headers.get("Content-Type", "")
+        content_type = response.headers.get(
+            "Content-Type",
+            "",
+        ).lower()
 
-        if not content_type.lower().startswith("image/"):
-            raise ValueError(
-                f"Not an image response: {content_type}"
+        if not (
+            content_type.startswith("image/")
+            or urlparse(url).path.lower().endswith(
+                (".jpg", ".jpeg", ".png", ".webp")
             )
+        ):
+            log(
+                f"Unexpected content type: {content_type}",
+                "WARN",
+            )
+            return False
 
-        output_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        total = 0
-
-        with open(output_path, "wb") as f:
-            for chunk in response.iter_content(
-                chunk_size=64 * 1024
-            ):
+        with destination.open("wb") as handle:
+            for chunk in response.iter_content(1024 * 128):
                 if chunk:
-                    f.write(chunk)
-                    total += len(chunk)
+                    handle.write(chunk)
 
-        if total == 0:
-            raise ValueError("Downloaded image is empty")
+        return destination.exists() and destination.stat().st_size > 0
 
-        log(
-            f"Downloaded {total:,} bytes -> {output_path}",
-            "DEBUG",
-        )
-
-        return True
-
-    except Exception as exc:
-        log(
-            f"Image download failed: {exc}",
-            "ERROR",
-        )
-
-        try:
-            if output_path.exists():
-                output_path.unlink()
-        except Exception:
-            pass
-
+    except requests.RequestException as exc:
+        log(f"Image download failed: {exc}", "ERROR")
         return False
 
 
-# ---------------------------------------------------------------------
-# CACHE
-# ---------------------------------------------------------------------
-
-def save_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-
-def load_json(path):
-    try:
-        return json.loads(
-            path.read_text(encoding="utf-8")
-        )
-    except Exception:
-        return {}
-
-
-# ---------------------------------------------------------------------
-# PROCESS ONE SLIDE
-# ---------------------------------------------------------------------
-
 def process_slide(slide_path, image_dir, allowed=None, force=False):
     """
-    Compatibility-preserving entry point.
-
-    Existing run.sh/pipeline can continue calling:
-
-        process_slide(path, image_dir, allowed, force)
-
-    'allowed' is retained for compatibility, but Wikipedia article
-    images are not treated as license-verified by this stage.
+    Compatibility-preserving entry point used by run.sh/pipeline.
     """
 
     slide_path = Path(slide_path)
-    image_dir = Path(image_dir)
+    image_root = Path(image_dir) if image_dir else Path(DEFAULT_CACHE_ROOT)
 
-    data = json.loads(
-        slide_path.read_text(encoding="utf-8")
-    )
-
-    slide = data.get("slide", data)
-
-    number = slide.get("number", "?")
-    headline = slide.get("headline", "")
-
-    # Persistent cache configured in config.yaml.
-    # Fall back to the existing project-wide location.
-    global CONFIG
-
-    images_cfg = (
-        CONFIG.get("images", {})
-        if isinstance(CONFIG, dict)
-        else {}
-    )
-
-    cache_root = Path(
-        images_cfg.get(
-            "cache_folder",
-            DEFAULT_CACHE,
-        )
-    )
-
-    log(f"===== Slide {number} =====")
-    log(f"File: {slide_path}", "DEBUG")
-    log(f"Headline: {headline}")
-    log(f"Persistent cache root: {cache_root}", "DEBUG")
-    log(f"Force refresh: {force}", "DEBUG")
+    try:
+        with slide_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception as exc:
+        log(f"{slide_path}: unable to read JSON: {exc}", "ERROR")
+        return False
 
     candidates = extract_candidates(data)
 
-    log(
-        f"Candidates ({len(candidates)}): {candidates}",
-        "DEBUG",
-    )
+    if not candidates:
+        log(f"{slide_path.name}: no usable Wikipedia candidates", "WARN")
+        return False
 
-    open_image = data.setdefault(
-        "open_image",
-        {},
-    )
+    open_image = data.get("open_image", {}) or {}
 
-    open_image.update({
-        "provider": "Wikipedia / Wikimedia",
-        "search_queries": candidates,
-    })
+    # Reuse existing local image unless force is requested.
+    existing = (
+        open_image.get("image", {}) or {}
+    ).get("local_file")
 
-    # --------------------------------------------------------------
-    # CACHE-FIRST
-    # --------------------------------------------------------------
+    if existing and not force:
+        existing_path = Path(existing)
 
-    for query in candidates:
+        if existing_path.exists():
+            log(f"Using cached image: {existing_path}")
+            return True
 
-        entity_dir = cache_root / slugify(query)
-        metadata_path = entity_dir / "metadata.json"
+    result = None
 
-        if not force and metadata_path.exists():
+    # Search candidates sequentially and STOP after first success.
+    for index, query in enumerate(candidates):
 
-            metadata = load_json(metadata_path)
+        result = find_wikipedia_image(query)
 
-            if (
-                metadata.get("status") == "ok"
-                and metadata.get("local_file")
-                and Path(
-                    metadata["local_file"]
-                ).exists()
-            ):
+        if result:
+            break
 
-                log(
-                    f"CACHE HIT: {query} -> "
-                    f"{metadata['local_file']}"
-                )
+        # Avoid hammering Wikipedia with back-to-back searches.
+        if index < len(candidates) - 1:
+            time.sleep(1.5)
 
-                open_image.update(metadata)
-                open_image["status"] = "cached"
-
-                slide["image_url"] = ""
-
-                save_json(
-                    slide_path,
-                    data,
-                )
-
-                return True
-
-    # --------------------------------------------------------------
-    # WIKIPEDIA SEARCH
-    # --------------------------------------------------------------
-
-    for query in candidates:
-
-        entity_dir = cache_root / slugify(query)
-        metadata_path = entity_dir / "metadata.json"
-
-        # Don't reuse negative cache unless --force is supplied.
-        if not force and metadata_path.exists():
-
-            metadata = load_json(metadata_path)
-
-            if metadata.get("status") == "not_found":
-                log(
-                    f"NEGATIVE CACHE HIT: {query}",
-                    "DEBUG",
-                )
-                continue
-
-        results = search_wikipedia(query)
-
-        if not results:
-            continue
-
-        article = choose_article(
-            query,
-            results,
-        )
-
-        if not article:
-            continue
-
-        log(
-            f'Wikipedia article selected: '
-            f'{article.get("title")!r}'
-        )
-
-        pageid = article.get("pageid")
-
-        if not pageid:
-            continue
-
-        image_info = get_article_image(pageid)
-
-        if not image_info:
-            log(
-                f'No article image for "{query}"',
-                "WARN",
-            )
-            continue
-
-        width = int(image_info.get("width") or 0)
-        height = int(image_info.get("height") or 0)
-
-        if width < MIN_WIDTH or height < MIN_HEIGHT:
-            log(
-                f'Image too small for "{query}": '
-                f"{width}x{height}",
-                "WARN",
-            )
-            continue
-
-        image_url = image_info.get("image_url")
-
-        if not image_url:
-            continue
-
-        # ----------------------------------------------------------
-        # DOWNLOAD
-        # ----------------------------------------------------------
-
-        clean_url = clean_image_url(image_url)
-
-        # First determine extension from URL.
-        ext = image_extension(clean_url)
-
-        image_path = entity_dir / f"image{ext}"
-
-        if not download_image(
-            image_url,
-            image_path,
-        ):
-            continue
-
-        wikipedia_title = article.get(
-            "title",
-            query,
-        )
-
-        wikipedia_url = (
-            "https://en.wikipedia.org/wiki/"
-            + quote(
-                wikipedia_title.replace(" ", "_"),
-                safe="_()",
-            )
-        )
-
-        metadata = {
-            "status": "ok",
-
+    if not result:
+        data["open_image"] = {
             "provider": "Wikipedia / Wikimedia",
-
-            "entity": query,
-
-            "wikipedia": {
-                "title": wikipedia_title,
-                "pageid": pageid,
-                "url": wikipedia_url,
-            },
-
-            "image": {
-                "source_url": clean_url,
-                "local_file": str(
-                    image_path.resolve()
-                ),
-                "width": width,
-                "height": height,
-            },
-
-            "source_domain": "upload.wikimedia.org",
-
+            "status": "not_found",
             "license_verification": {
-                "status": "NOT_VERIFIED",
-                "note": (
-                    "Image was obtained from the main image of "
-                    "a Wikipedia article. The image may originate "
-                    "from Wikimedia Commons, but this pipeline "
-                    "does not currently verify the Commons file "
-                    "license because commons.wikimedia.org is "
-                    "not reachable from the current network."
-                ),
+                "status": "NOT_VERIFIED"
             },
-
-            "search_query": query,
         }
 
-        save_json(
-            metadata_path,
+        with slide_path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+
+        log(f"{slide_path.name}: no Wikipedia image found", "WARN")
+        return False
+
+    entity = result["entity"]
+    slug = slugify(entity)
+
+    entity_dir = image_root / slug
+    entity_dir.mkdir(parents=True, exist_ok=True)
+
+    source_url = result["image"]["source_url"]
+
+    suffix = Path(
+        urlparse(source_url).path
+    ).suffix.lower()
+
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        suffix = ".jpg"
+
+    local_file = entity_dir / f"image{suffix}"
+
+    if force or not local_file.exists():
+        log(f"Downloading image: {source_url}")
+
+        if not download_image(source_url, local_file):
+            return False
+    else:
+        log(f"Using cached image: {local_file}")
+
+    result["image"]["local_file"] = str(local_file)
+
+    # Keep image_url empty so downstream code doesn't accidentally
+    # download/use the original remote source.
+    data["image_url"] = ""
+
+    data["open_image"] = result
+
+    # Persist metadata.
+    metadata = {
+        "provider": result["provider"],
+        "entity": result["entity"],
+        "source_url": source_url,
+        "local_file": str(local_file),
+        "license_verification": result["license_verification"],
+    }
+
+    with (entity_dir / "metadata.json").open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(
             metadata,
+            handle,
+            ensure_ascii=False,
+            indent=2,
         )
 
-        open_image.update(metadata)
-
-        # Painter should use local_file, not the remote BH/Wikipedia URL.
-        slide["image_url"] = ""
-
-        save_json(
-            slide_path,
+    with slide_path.open("w", encoding="utf-8") as handle:
+        json.dump(
             data,
+            handle,
+            ensure_ascii=False,
+            indent=2,
         )
-
-        log(
-            f"SUCCESS: {image_path}"
-        )
-
-        return True
-
-    # --------------------------------------------------------------
-    # NOTHING FOUND
-    # --------------------------------------------------------------
 
     log(
-        "All Wikipedia candidates failed",
-        "WARN",
+        f"[SUCCESS] {slide_path.name}: "
+        f"{entity} -> {local_file}"
     )
 
-    # Cache negative result for each attempted entity.
-    for query in candidates:
+    return True
 
-        entity_dir = cache_root / slugify(query)
-        metadata_path = entity_dir / "metadata.json"
-
-        if force or not metadata_path.exists():
-
-            save_json(
-                metadata_path,
-                {
-                    "status": "not_found",
-                    "provider": "Wikipedia / Wikimedia",
-                    "entity": query,
-                    "search_query": query,
-                    "reason": (
-                        "No usable Wikipedia article image "
-                        "was found."
-                    ),
-                },
-            )
-
-    open_image.update({
-        "status": "not_found",
-        "provider": "Wikipedia / Wikimedia",
-        "search_queries": candidates,
-        "fallback": "cinematic_background",
-        "reason": (
-            "No usable Wikipedia article image was found."
-        ),
-    })
-
-    slide["image_url"] = ""
-
-    save_json(
-        slide_path,
-        data,
-    )
-
-    return False
-
-
-# ---------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------
 
 def main():
-
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -920,109 +678,73 @@ def main():
     )
 
     parser.add_argument(
-        "--config",
-        default=DEFAULT_CONFIG,
+        "--input-dir",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--image-dir",
+        default=DEFAULT_CACHE_ROOT,
     )
 
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Ignore existing positive/negative cache entries.",
     )
 
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable detailed diagnostics.",
     )
 
     args = parser.parse_args()
 
-    global DEBUG
-    DEBUG = args.debug
-
-    global CONFIG
-    CONFIG = load_config(args.config)
-
-    output_root = Path(
-        CONFIG["output"]["folder"]
-    )
-
-    qwen_dir = (
-        output_root
-        / "qwen_input"
-        / args.category
-    )
-
-    image_dir = (
-        output_root
-        / "open_images"
-        / args.category
-    )
-
-    if not qwen_dir.exists():
-        raise FileNotFoundError(
-            f"Category input folder not found: {qwen_dir}"
+    if args.input_dir:
+        input_dir = Path(args.input_dir)
+    else:
+        input_dir = (
+            Path(
+                "/Volumes/Extreme SSD/webmaster-ai/"
+                "POJO_PROJECT/bollywood/DEV_2.0/"
+                "bollywoodkoko_rsstojson"
+            )
+            / "OP_JSON"
+            / "qwen_input"
+            / args.category
         )
 
-    slides = sorted(
-        qwen_dir.glob("slide_*.json")
+    if not input_dir.exists():
+        log(f"Input directory does not exist: {input_dir}", "ERROR")
+        sys.exit(1)
+
+    slide_files = sorted(input_dir.glob("slide_*.json"))
+
+    if not slide_files:
+        log(f"No slide JSON files found in {input_dir}", "WARN")
+        return
+
+    log(f"Category : {args.category}")
+    log(f"Input    : {input_dir}")
+    log(f"Cache    : {args.image_dir}")
+    log(f"Slides   : {len(slide_files)}")
+
+    success = 0
+
+    for slide_path in slide_files:
+        log(f"Processing {slide_path.name}")
+
+        if process_slide(
+            slide_path,
+            args.image_dir,
+            allowed=None,
+            force=args.force,
+        ):
+            success += 1
+
+    log(
+        f"Completed: {success}/{len(slide_files)} "
+        f"slides have Wikipedia images."
     )
-
-    print("==========================================")
-    print(" Wikipedia Image Fetcher")
-    print("==========================================")
-    print(f"Category      : {args.category}")
-    print(f"Slides        : {len(slides)}")
-    print(f"Output images : {image_dir}")
-    print(
-        "Provider      : Wikipedia -> upload.wikimedia.org"
-    )
-    print(
-        "License       : NOT VERIFIED at image-fetch stage"
-    )
-
-    found = 0
-
-    for path in slides:
-
-        try:
-
-            ok = process_slide(
-                path,
-                image_dir,
-                None,
-                args.force,
-            )
-
-            if ok:
-                found += 1
-
-        except Exception as exc:
-
-            print(
-                f"    [ERROR] {path.name}: {exc}"
-            )
-
-        # Keep requests serialized.
-        time.sleep(0.5)
-
-    image_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    print()
-    print(
-        f"Completed: {found}/{len(slides)} slides "
-        f"have Wikipedia images."
-    )
-
-    if found:
-        print(
-            "Images are stored in the persistent cache "
-            "and referenced through open_image.local_file."
-        )
 
 
 if __name__ == "__main__":
