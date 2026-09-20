@@ -26,7 +26,6 @@ from pathlib import Path
 
 import requests
 import yaml
-from bs4 import BeautifulSoup
 
 
 DEFAULT_CONFIG = "config.yaml"
@@ -36,10 +35,6 @@ HEADLINE_MAX_CHARS = 110
 
 # This is ONLY a safety limit. Normal Qwen summaries are NOT truncated.
 SUMMARY_SAFETY_MAX_CHARS = 1200
-
-# Image discovery is only used when the RSS/source JSON does not already
-# provide an image URL. This keeps the existing image path untouched.
-IMAGE_DISCOVERY_TIMEOUT = 20
 
 
 DEFAULT_QWEN_CONFIG = {
@@ -399,6 +394,22 @@ def qwen_summarize(
         )
     )
 
+    image_subjects = data.get("image_subjects", [])
+    if isinstance(image_subjects, str):
+        image_subjects = [image_subjects]
+    if not isinstance(image_subjects, list):
+        image_subjects = []
+
+    # Keep only short, named, non-generic subjects.
+    image_subjects = [
+        clean_text(x) for x in image_subjects
+        if clean_text(x)
+        and len(clean_text(x).split()) <= 6
+    ][:4]
+
+    # If Qwen omitted subjects, use the headline/source for a conservative
+    # fallback in the fetcher rather than inventing an entity here.
+
     # If Qwen accidentally returns a Hindi headline, do not use it.
     if headline and re.search(r"[\u0900-\u097F]", headline):
         headline = ""
@@ -418,141 +429,14 @@ def qwen_summarize(
         "headline": headline,
         "summary": summary,
         "summary_hindi": summary_hindi,
+        "image_subjects": image_subjects,
     }
 
-
-def _first_non_empty(*values):
-    """Return the first non-empty value as a string."""
-    for value in values:
-        if value is None:
-            continue
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        if value:
-            return str(value).strip()
-    return ""
-
-
-def extract_image_url_from_story(story):
-    """
-    Extract an image URL from common RSS/source-JSON structures.
-
-    Supported forms include:
-      image_url, image, thumbnail
-      media_content[].url
-      media_thumbnail[].url
-      enclosures[].href/url
-    """
-    direct = _first_non_empty(
-        story.get("image_url"),
-        story.get("image"),
-        story.get("thumbnail"),
-    )
-    if direct:
-        return direct
-
-    for key in ("media_content", "media_thumbnail", "enclosures"):
-        items = story.get(key) or []
-        if isinstance(items, dict):
-            items = [items]
-        if not isinstance(items, list):
-            continue
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            url = _first_non_empty(
-                item.get("url"),
-                item.get("href"),
-                item.get("src"),
-            )
-            if url:
-                return url
-
-    return ""
-
-
-def extract_image_from_article_url(source_url):
-    """
-    Fallback image discovery from the article page when RSS contains no
-    image URL. Prefer Open Graph/Twitter metadata, then JSON-LD image.
-    """
-    if not source_url:
-        return ""
-
-    try:
-        response = requests.get(
-            source_url,
-            timeout=IMAGE_DISCOVERY_TIMEOUT,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/153.0 Safari/537.36 BollywoodKoko/1.0"
-                )
-            },
-        )
-        response.raise_for_status()
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        # 1. Open Graph
-        for selector in [
-            ("meta", {"property": "og:image"}),
-            ("meta", {"name": "og:image"}),
-            ("meta", {"property": "og:image:url"}),
-            ("meta", {"name": "twitter:image"}),
-            ("meta", {"property": "twitter:image"}),
-        ]:
-            tag = soup.find(*selector)
-            if tag and tag.get("content"):
-                return tag["content"].strip()
-
-        # 2. link rel=image_src
-        tag = soup.find("link", rel=lambda value: value and "image_src" in value)
-        if tag and tag.get("href"):
-            return tag["href"].strip()
-
-        # 3. JSON-LD
-        for script in soup.find_all("script", type="application/ld+json"):
-            raw = script.string or script.get_text(strip=True)
-            if not raw:
-                continue
-            try:
-                payload = json.loads(raw)
-            except Exception:
-                continue
-
-            candidates = payload if isinstance(payload, list) else [payload]
-            for obj in candidates:
-                if not isinstance(obj, dict):
-                    continue
-                image = obj.get("image")
-                if isinstance(image, str) and image.strip():
-                    return image.strip()
-                if isinstance(image, dict):
-                    url = image.get("url") or image.get("contentUrl")
-                    if url:
-                        return str(url).strip()
-                if isinstance(image, list):
-                    for item in image:
-                        if isinstance(item, str) and item.strip():
-                            return item.strip()
-                        if isinstance(item, dict):
-                            url = item.get("url") or item.get("contentUrl")
-                            if url:
-                                return str(url).strip()
-
-    except Exception as exc:
-        print(f"    [WARN] Article image discovery failed: {exc}")
-
-    return ""
 
 def extract_story_fields(story):
     """
     Handle the expected Bollywood Hungama story structure while allowing
-    small variations in field names. If RSS does not contain an image,
-    fall back to the article URL and discover og:image/twitter:image/JSON-LD.
+    small variations in field names.
     """
     title = (
         story.get("title")
@@ -568,23 +452,6 @@ def extract_story_fields(story):
         or ""
     )
 
-    source_url = (
-        story.get("source_url")
-        or story.get("link")
-        or story.get("url")
-        or ""
-    )
-
-    image_url = extract_image_url_from_story(story)
-
-    if not image_url and source_url:
-        print("    → No RSS image; discovering image from article page")
-        image_url = extract_image_from_article_url(source_url)
-        if image_url:
-            print(f"    ✓ Image found: {image_url}")
-        else:
-            print("    ⚠ No article image found")
-
     return {
         "title": clean_text(title),
         "description": clean_text(description),
@@ -592,8 +459,14 @@ def extract_story_fields(story):
         or story.get("pubDate")
         or story.get("published")
         or "",
-        "image_url": image_url,
-        "source_url": source_url,
+        "image_url": story.get("image_url")
+        or story.get("image")
+        or story.get("thumbnail")
+        or "",
+        "source_url": story.get("source_url")
+        or story.get("link")
+        or story.get("url")
+        or "",
     }
 
 
@@ -646,6 +519,7 @@ def build_slide(
             "headline": qwen_result["headline"],
             "story": qwen_result["summary"],
             "story_hindi": qwen_result["summary_hindi"],
+            "image_subjects": qwen_result.get("image_subjects", []),
             "published_at": published_at,
             "published_date": published_date,
             "published_time": published_time,
@@ -769,6 +643,7 @@ def convert_category(
                 "headline": clean_headline(fields["title"]),
                 "summary": fallback_summary,
                 "summary_hindi": "",
+                "image_subjects": [],
             }
 
         slide = build_slide(
@@ -835,16 +710,6 @@ def main():
         help="Skip the initial Ollama connectivity check.",
     )
 
-    parser.add_argument(
-        "--category",
-        default=None,
-        help=(
-            "Process only this category "
-            "(e.g. news, features, movie_reviews). "
-            "If omitted, all categories are processed."
-        ),
-    )
-
     args = parser.parse_args()
 
     try:
@@ -885,32 +750,9 @@ def main():
                 "Expected source JSON structure: categories -> object"
             )
 
-        # Select only the requested category when --category is supplied.
-        if args.category:
-            category_key = args.category.strip()
-
-            if category_key not in categories:
-                available = ", ".join(categories.keys())
-                raise ValueError(
-                    f"Category '{category_key}' not found. "
-                    f"Available categories: {available}"
-                )
-
-            selected_categories = {
-                category_key: categories[category_key]
-            }
-
-            print(f"Category    : {category_key}")
-            print("Mode        : Single category")
-        else:
-            selected_categories = categories
-
-            print("Category    : ALL")
-            print("Mode        : All categories")
-
         manifests = {}
 
-        for category_key, category_data in selected_categories.items():
+        for category_key, category_data in categories.items():
             if not isinstance(category_data, dict):
                 continue
 
@@ -931,7 +773,6 @@ def main():
             manifests[category_key] = manifest
 
         master_manifest = {
-            "category_filter": args.category,
             "source": {
                 "file": str(source_json_path),
                 "name": config.get("source", {}).get(

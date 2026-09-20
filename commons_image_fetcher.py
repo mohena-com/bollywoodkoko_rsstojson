@@ -124,6 +124,112 @@ def wikipedia_get(params):
     return None
 
 
+def get_image_subjects(data):
+    """Return Qwen-selected visual subjects in priority order."""
+    subjects = data.get("image_subjects", [])
+
+    if not subjects:
+        qwen = data.get("qwen", {}) or {}
+        subjects = qwen.get("image_subjects", [])
+
+    if isinstance(subjects, str):
+        subjects = [subjects]
+    if not isinstance(subjects, list):
+        return []
+
+    generic = {
+        "box office", "blockbuster", "hollywood", "bollywood",
+        "entertainment", "movie news", "film news", "announcement",
+        "film release", "release", "industry", "social media",
+        "movie", "film", "show", "story", "news",
+    }
+
+    result = []
+    for item in subjects:
+        item = clean(item)
+        if not item or item.casefold() in generic:
+            continue
+        if len(item.split()) > 6:
+            continue
+        if item not in result:
+            result.append(item)
+    return result[:4]
+
+
+def article_description(title):
+    """Get Wikipedia's short article description for person validation."""
+    params = {
+        "action": "query",
+        "format": "json",
+        "titles": title,
+        "prop": "description|pageprops",
+    }
+    response = wikipedia_get(params)
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+    pages = payload.get("query", {}).get("pages", {})
+    for page in pages.values():
+        return clean(page.get("description", ""))
+    return ""
+
+
+def looks_like_person(title, description=""):
+    """Conservative check that a Wikipedia result represents a person."""
+    text = f"{title} {description}".casefold()
+    person_terms = (
+        "actor", "actress", "singer", "director", "producer",
+        "filmmaker", "screenwriter", "composer", "musician",
+        "television personality", "model", "dancer", "celebrit",
+        "film director", "film producer", "writer", "artist",
+    )
+    return any(term in text for term in person_terms)
+
+
+def search_person_image(query):
+    """Search Wikipedia specifically for a person and reject generic pages."""
+    log(f'Person candidate "{query}"')
+    results = search_wikipedia(query)
+    if not results:
+        return None
+
+    q = clean(query).casefold()
+    ordered = sorted(
+        results,
+        key=lambda item: 0 if clean(item.get("title", "")).casefold() == q else 1,
+    )
+
+    for item in ordered:
+        title = clean(item.get("title", ""))
+        if not title:
+            continue
+        description = article_description(title)
+        if not looks_like_person(title, description):
+            log(f"Rejected non-person article: {title} ({description})", "DEBUG")
+            continue
+        image = get_article_image(title)
+        if image:
+            return {
+                "provider": "Wikipedia / Wikimedia",
+                "status": "ok",
+                "entity": title,
+                "entity_type": "person",
+                "image": image,
+                "license_verification": {
+                    "status": "NOT_VERIFIED",
+                    "reason": (
+                        "Image was retrieved through Wikipedia. "
+                        "The pipeline does not independently verify "
+                        "the underlying Wikimedia Commons license."
+                    ),
+                },
+            }
+    return None
+
+
 def extract_candidates(data):
     """
     Extract high-quality Wikipedia search candidates.
@@ -551,9 +657,15 @@ def process_slide(slide_path, image_dir, allowed=None, force=False):
         log(f"{slide_path}: unable to read JSON: {exc}", "ERROR")
         return False
 
+    image_subjects = get_image_subjects(data)
     candidates = extract_candidates(data)
 
-    if not candidates:
+    if image_subjects:
+        log("Qwen image subjects:")
+        for index, subject in enumerate(image_subjects, 1):
+            log(f"  {index}. {subject}")
+
+    if not image_subjects and not candidates:
         log(f"{slide_path.name}: no usable Wikipedia candidates", "WARN")
         return False
 
@@ -573,17 +685,27 @@ def process_slide(slide_path, image_dir, allowed=None, force=False):
 
     result = None
 
-    # Search candidates sequentially and STOP after first success.
-    for index, query in enumerate(candidates):
-
-        result = find_wikipedia_image(query)
-
+    # ---------------------------------------------------------
+    # 1. Qwen-selected people/entities first.
+    #    If the subject looks like a person, validate that the
+    #    Wikipedia result is actually a person before accepting it.
+    # ---------------------------------------------------------
+    for index, query in enumerate(image_subjects):
+        result = search_person_image(query)
         if result:
             break
+        time.sleep(1.0)
 
-        # Avoid hammering Wikipedia with back-to-back searches.
-        if index < len(candidates) - 1:
-            time.sleep(1.5)
+    # ---------------------------------------------------------
+    # 2. Existing deterministic candidates as fallback.
+    # ---------------------------------------------------------
+    if not result:
+        for index, query in enumerate(candidates):
+            result = find_wikipedia_image(query)
+            if result:
+                break
+            if index < len(candidates) - 1:
+                time.sleep(1.5)
 
     if not result:
         data["open_image"] = {
@@ -601,6 +723,7 @@ def process_slide(slide_path, image_dir, allowed=None, force=False):
         return False
 
     entity = result["entity"]
+    selected_subject = image_subjects[0] if image_subjects else entity
     slug = slugify(entity)
 
     entity_dir = image_root / slug
@@ -631,12 +754,15 @@ def process_slide(slide_path, image_dir, allowed=None, force=False):
     # download/use the original remote source.
     data["image_url"] = ""
 
+    result["selected_subject"] = selected_subject
     data["open_image"] = result
 
     # Persist metadata.
     metadata = {
         "provider": result["provider"],
         "entity": result["entity"],
+        "entity_type": result.get("entity_type", "unknown"),
+        "selected_subject": selected_subject,
         "source_url": source_url,
         "local_file": str(local_file),
         "license_verification": result["license_verification"],
