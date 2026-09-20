@@ -39,6 +39,12 @@ USER_AGENT = (
     "(Wikipedia image fetcher; contact: your-email@example.com)"
 )
 
+IMAGE_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/153.0.0.0 Safari/537.36"
+)
+
 TIMEOUT = 30
 
 # Minimum image dimensions we will accept.
@@ -342,8 +348,16 @@ def download_image(image_info, output_dir):
         exist_ok=True,
     )
 
-    # Try to preserve the original extension.
+    # Strip tracking/query parameters added by the Wikipedia API.
+    # The clean upload.wikimedia.org URL is the form that was
+    # verified to work from the current environment.
     parsed = urlparse(image_url)
+
+    clean_url = (
+        f"{parsed.scheme}://"
+        f"{parsed.netloc}"
+        f"{parsed.path}"
+    )
 
     filename = Path(
         unquote(parsed.path)
@@ -354,9 +368,6 @@ def download_image(image_info, output_dir):
     if not filename:
         filename = "image"
 
-    # Remove Wikimedia query-derived oddities.
-    filename = filename.split("?")[0]
-
     output_path = output_dir / filename
 
     print()
@@ -364,25 +375,35 @@ def download_image(image_info, output_dir):
     print("DOWNLOADING IMAGE")
     print("=" * 70)
 
-    print("URL :", image_url)
-    print("File:", output_path)
+    print("Original URL :", image_url)
+    print("Clean URL    :", clean_url)
+    print("File         :", output_path)
 
     headers = {
-        "User-Agent": USER_AGENT,
+        "User-Agent": IMAGE_USER_AGENT,
+        "Accept": (
+            "image/avif,image/webp,image/apng,"
+            "image/svg+xml,image/*,*/*;q=0.8"
+        ),
+        "Referer": "https://en.wikipedia.org/",
         "Connection": "close",
     }
 
     try:
 
-        response = session.get(
-            image_url,
+        response = requests.get(
+            clean_url,
             headers=headers,
             timeout=60,
             stream=True,
+            allow_redirects=True,
         )
 
-        print("HTTP status:", response.status_code)
-        print("Content-Type:", response.headers.get("Content-Type"))
+        print("HTTP status :", response.status_code)
+        print(
+            "Content-Type:",
+            response.headers.get("Content-Type"),
+        )
 
         response.raise_for_status()
 
@@ -398,7 +419,6 @@ def download_image(image_info, output_dir):
                     continue
 
                 file.write(chunk)
-
                 total += len(chunk)
 
         print()
@@ -427,6 +447,7 @@ def download_image(image_info, output_dir):
 # ============================================================
 # SAVE METADATA
 # ============================================================
+
 
 def save_metadata(
     entity,
