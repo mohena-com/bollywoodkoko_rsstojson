@@ -1,0 +1,66 @@
+source:
+  name: "Bollywood Hungama"
+  timezone: "Asia/Kolkata"
+
+feeds:
+  news:
+    url: "https://www.bollywoodhungama.com/rss/news.xml"
+    heading: "Latest Bollywood News"
+    label: "News"
+
+  features:
+    url: "https://www.bollywoodhungama.com/rss/features.xml"
+    heading: "Bollywood Features"
+    label: "Features"
+
+  movie_reviews:
+    url: "https://www.bollywoodhungama.com/rss/movie-review.xml"
+    heading: "Movie Reviews"
+    label: "Movie Review"
+
+  movie_previews:
+    url: "https://www.bollywoodhungama.com/rss/movie-preview.xml"
+    heading: "Movie Previews"
+    label: "Movie Preview"
+
+  music_reviews:
+    url: "https://www.bollywoodhungama.com/rss/music-review.xml"
+    heading: "Music Reviews"
+    label: "Music Review"
+
+  movie_release_dates:
+    url: "https://www.bollywoodhungama.com/rss/movie-release-date.xml"
+    heading: "Movie Release Dates"
+    label: "Movie Release Date"
+
+  special_analysis:
+    url: "https://www.bollywoodhungama.com/rss/news-bo-special-analysis.xml"
+    heading: "Special Analysis"
+    label: "Special Analysis"
+
+output:
+  # Change this to your desired external output folder.
+  folder: "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/bollywood/OP_JSON"
+  filename: "bollywood_hungama_today.json"
+
+reel:
+  music_folder: "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/data/music"
+  duration_per_slide: 5.0
+
+qwen:
+  ollama_url: "http://localhost:11434"
+  model: "qwen3:8b"
+  temperature: 0.2
+  timeout: 120
+images:
+  provider: "wikimedia_commons"
+  commons_api: "https://commons.wikimedia.org/w/api.php"
+  commons_file_page: "https://commons.wikimedia.org/wiki/"
+  cache_folder: "/Volumes/Extreme SSD/webmaster-ai/POJO_PROJECT/data/images"
+  allow_remote_source_images: false
+  allowed_licenses:
+    - "Public domain"
+    - "CC0"
+    - "CC BY 4.0"
+    - "CC BY 3.0"
+    - "CC BY 2.0"
