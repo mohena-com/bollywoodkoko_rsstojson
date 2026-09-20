@@ -22,6 +22,7 @@ import yaml
 
 
 DEBUG = True
+CONFIG = {}
 
 def log(message, level="INFO"):
     """Consistent diagnostic logging. DEBUG messages appear only with --debug."""
@@ -39,7 +40,8 @@ def log_candidates(candidates):
 
 
 DEFAULT_CONFIG = "config.yaml"
-COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+DEFAULT_COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+DEFAULT_COMMONS_FILE_PAGE = "https://commons.wikimedia.org/wiki/"
 USER_AGENT = "BollywoodKoko/1.0 (licensed image fetcher; contact project owner)"
 
 DEFAULT_ALLOWED = {
@@ -231,13 +233,17 @@ def normalize_license(value):
 
 def allowed_license(short_name, long_name, allowed):
     combined = f"{short_name} {long_name}".lower()
-    if "noncommercial" in combined or "nc" in combined or "no derivatives" in combined or "nd" in combined:
+    if (
+        "noncommercial" in combined
+        or " no derivatives" in combined
+        or combined.strip().endswith(" nd")
+    ):
         return False
     norm = normalize_license(short_name)
     return norm in allowed or any(a in norm for a in allowed)
 
 
-def search_commons(query, allowed):
+def search_commons(query, allowed, commons_api=None):
     """Search Wikimedia Commons and return candidates with diagnostics."""
     log(f'Searching Wikimedia Commons: "{query}"')
     log(f"Allowed licenses: {sorted(allowed)}", "DEBUG")
@@ -255,7 +261,7 @@ def search_commons(query, allowed):
 
     try:
         response = requests.get(
-            COMMONS_API,
+            commons_api or DEFAULT_COMMONS_API,
             params=params,
             headers={"User-Agent": USER_AGENT},
             timeout=20,
@@ -305,9 +311,10 @@ def search_commons(query, allowed):
             x for x in [license_short, usage_terms] if x
         ).strip()
 
-        allowed_match = any(
-            allowed_name.casefold() in license_text.casefold()
-            for allowed_name in allowed
+        allowed_match = allowed_license(
+            license_short,
+            usage_terms,
+            allowed,
         )
 
         if not allowed_match:
@@ -347,11 +354,41 @@ def download_image(url, path):
     path.write_bytes(r.content)
 
 
-def process_slide(slide, config, force=False):
-    """Person-first, cache-first Wikimedia image resolution."""
+def slugify(value):
+    value = clean(value).lower()
+    value = re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+    return value or "unknown"
+
+
+def process_slide(slide_path, image_dir, allowed, force=False):
+    """
+    Compatibility-preserving image resolution.
+
+    Existing pipeline calls:
+        process_slide(slide_path, image_dir, allowed, force)
+
+    Resolution order:
+        1. Extract person/movie candidates
+        2. Check persistent cache
+        3. Search Wikimedia Commons on cache miss
+        4. Verify allowed license + image MIME
+        5. Download locally and write attribution metadata
+        6. Mark cinematic fallback if nothing usable is found
+    """
+    slide_path = Path(slide_path)
+    slide = json.loads(slide_path.read_text(encoding="utf-8"))
+    config = CONFIG
+
     images_cfg = config.get("images", {}) or {}
-    cache_root = Path(images_cfg.get("cache_folder", "./images"))
-    allowed = set(images_cfg.get("allowed_licenses", DEFAULT_ALLOWED))
+    cache_root = Path(images_cfg.get("cache_folder", str(image_dir)))
+    commons_api = images_cfg.get("commons_api", DEFAULT_COMMONS_API)
+    commons_file_page = images_cfg.get(
+        "commons_file_page", DEFAULT_COMMONS_FILE_PAGE
+    )
+
+    allowed = {
+        normalize_license(x) for x in (allowed or DEFAULT_ALLOWED)
+    }
 
     slide_obj = slide.get("slide", slide)
     number = slide_obj.get("number", "?")
@@ -377,9 +414,12 @@ def process_slide(slide, config, force=False):
             "fallback": "cinematic_background",
             "reason": "No person/movie search candidate could be extracted.",
         })
-        return slide
+        slide_path.write_text(
+            json.dumps(slide, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return False
 
-    # Import existing helpers from the current module scope.
     for query in candidates:
         slug = slugify(query)
         cache_dir = cache_root / slug
@@ -391,12 +431,15 @@ def process_slide(slide, config, force=False):
         log(f'Candidate "{query}"')
         log(f"Cache directory: {cache_dir}", "DEBUG")
 
+        # Positive cache
         if not force and image_path.exists():
             log(f"CACHE HIT: {image_path}")
             metadata = {}
             if metadata_path.exists():
                 try:
-                    metadata = json.loads(metadata_path.read_text())
+                    metadata = json.loads(
+                        metadata_path.read_text(encoding="utf-8")
+                    )
                 except Exception as exc:
                     log(f"Could not read cache metadata: {exc}", "WARN")
 
@@ -409,18 +452,41 @@ def process_slide(slide, config, force=False):
                 "license": metadata.get("license", ""),
                 "attribution": metadata.get("attribution", ""),
             })
-            log(f"Using cached image for {query!r}")
-            return slide
 
-        if image_path.exists() and force:
+            slide_path.write_text(
+                json.dumps(slide, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            log(f"Using cached image for {query!r}")
+            return True
+
+        if force and image_path.exists():
             log(f"CACHE BYPASS (--force): {image_path}", "DEBUG")
         else:
             log("CACHE MISS", "DEBUG")
 
-        results = search_commons(query, allowed)
+        # Negative cache: do not repeatedly query Commons unless --force.
+        negative_path = cache_dir / "not_found.json"
+        if not force and negative_path.exists():
+            log(f"NEGATIVE CACHE HIT: {negative_path}")
+            continue
+
+        results = search_commons(query, allowed, commons_api)
 
         if not results:
             log(f'No usable Wikimedia candidates for "{query}"', "WARN")
+            try:
+                negative_path.write_text(
+                    json.dumps({
+                        "query": query,
+                        "status": "not_found",
+                        "provider": "Wikimedia Commons",
+                        "reason": "No acceptable licensed image returned.",
+                    }, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                log(f"Could not write negative cache: {exc}", "DEBUG")
             continue
 
         for result_idx, result in enumerate(results, 1):
@@ -430,7 +496,7 @@ def process_slide(slide, config, force=False):
             )
 
             try:
-                downloaded = download_image(result["url"], image_path)
+                download_image(result["url"], image_path)
             except Exception as exc:
                 log(
                     f'Download failed for {result["title"]!r}: {exc}',
@@ -438,17 +504,17 @@ def process_slide(slide, config, force=False):
                 )
                 continue
 
-            if not downloaded or not image_path.exists():
+            if not image_path.exists() or image_path.stat().st_size == 0:
                 log(
-                    f'Download did not produce expected file: {image_path}',
+                    f"Download did not produce a valid file: {image_path}",
                     "WARN",
                 )
                 continue
 
             file_title = result["title"].replace("File:", "", 1)
             file_page = (
-                images_cfg.get("commons_file_page", "https://commons.wikimedia.org/wiki/")
-                + quote(file_title.replace(" ", "_"))
+                commons_file_page.rstrip("/") + "/" +
+                quote(file_title.replace(" ", "_"))
             )
 
             metadata = {
@@ -460,12 +526,19 @@ def process_slide(slide, config, force=False):
                 "license": result.get("license", ""),
                 "usage_terms": result.get("usage_terms", ""),
                 "license_url": result.get("license_url", ""),
-                "attribution": f'{file_title} — {result.get("license", "Wikimedia Commons")}',
+                "attribution": (
+                    f'{file_title} — '
+                    f'{result.get("license", "Wikimedia Commons")}'
+                ),
             }
 
             metadata_path.write_text(
-                json.dumps(metadata, indent=2, ensure_ascii=False)
+                json.dumps(metadata, indent=2, ensure_ascii=False),
+                encoding="utf-8",
             )
+
+            if negative_path.exists():
+                negative_path.unlink(missing_ok=True)
 
             open_image.update({
                 "status": "downloaded",
@@ -473,14 +546,21 @@ def process_slide(slide, config, force=False):
                 "query": query,
                 "local_file": str(image_path),
                 "file_page": file_page,
+                "file_page_url": file_page,
                 "license": result.get("license", ""),
                 "attribution": metadata["attribution"],
+                "file_name": file_title,
             })
+
+            slide_path.write_text(
+                json.dumps(slide, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
             log(f"SUCCESS: {image_path}")
             log(f'License: {result.get("license", "")}')
             log(f"Commons page: {file_page}")
-            return slide
+            return True
 
     log("All person-first candidates failed", "WARN")
     open_image.update({
@@ -488,64 +568,93 @@ def process_slide(slide, config, force=False):
         "provider": "Wikimedia Commons",
         "search_queries": candidates,
         "fallback": "cinematic_background",
-        "reason": "No sufficiently relevant image with an allowed license was found.",
+        "reason": (
+            "No sufficiently relevant image with an allowed license "
+            "was found."
+        ),
     })
-    return slide
+
+    slide_path.write_text(
+        json.dumps(slide, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return False
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--debug", action="store_true", help="Enable detailed image-stage diagnostics")
     parser.add_argument("--category", required=True)
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-    global DEBUG
+
+    global DEBUG, CONFIG
     DEBUG = True
+    CONFIG = load_config(args.config)
+
     log("Debug logging: ON (default)")
 
-    config = load_config(args.config)
-    output_root = Path(config["output"]["folder"])
+    output_root = Path(CONFIG["output"]["folder"])
     qwen_dir = output_root / "qwen_input" / args.category
     image_dir = output_root / "open_images" / args.category
-    if not qwen_dir.exists():
-        raise FileNotFoundError(f"Category input folder not found: {qwen_dir}")
 
-    configured = config.get("images", {}).get("allowed_licenses") or []
-    allowed = {normalize_license(x) for x in configured} or DEFAULT_ALLOWED
+    if not qwen_dir.exists():
+        raise FileNotFoundError(
+            f"Category input folder not found: {qwen_dir}"
+        )
+
+    configured = CONFIG.get("images", {}).get("allowed_licenses") or []
+    allowed = {
+        normalize_license(x) for x in configured
+    } or DEFAULT_ALLOWED
 
     slides = sorted(qwen_dir.glob("slide_*.json"))
+
+    image_dir.mkdir(parents=True, exist_ok=True)
+
     print("==========================================")
     print(" Wikimedia Commons Image Fetcher")
     print("==========================================")
     print(f"Category      : {args.category}")
     print(f"Slides        : {len(slides)}")
     print(f"Output images : {image_dir}")
+    print(f"Cache folder  : {CONFIG.get('images', {}).get('cache_folder', image_dir)}")
+    print(f"Commons API   : {CONFIG.get('images', {}).get('commons_api', DEFAULT_COMMONS_API)}")
     print(f"Allowed       : {', '.join(sorted(allowed))}")
 
     credits = []
     found = 0
+
     for path in slides:
         try:
             ok = process_slide(path, image_dir, allowed, args.force)
             if ok:
                 found += 1
+
             data = json.loads(path.read_text(encoding="utf-8"))
             img = data.get("open_image", {})
-            if img.get("status") == "ok":
+
+            if img.get("status") in {"downloaded", "cached"}:
                 credits.append(
-                    f"Slide {data['slide'].get('number')}: {img.get('file_name')} | "
-                    f"{img.get('attribution')} | {img.get('file_page_url')}"
+                    f"Slide {data.get('slide', {}).get('number')}: "
+                    f"{img.get('file_name', Path(img.get('local_file', '')).name)} | "
+                    f"{img.get('attribution', '')} | "
+                    f"{img.get('file_page_url', img.get('file_page', ''))}"
                 )
         except Exception as exc:
             print(f"    [ERROR] {path.name}: {exc}")
+
         time.sleep(0.2)
 
-    image_dir.mkdir(parents=True, exist_ok=True)
     (image_dir / "image_credits.txt").write_text(
         "\n".join(credits) + ("\n" if credits else ""),
         encoding="utf-8",
     )
-    print(f"\nCompleted: {found}/{len(slides)} slides have verified Commons images.")
+
+    print(
+        f"\nCompleted: {found}/{len(slides)} slides have "
+        f"verified Commons images."
+    )
 
 
 if __name__ == "__main__":
